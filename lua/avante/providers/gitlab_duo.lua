@@ -309,7 +309,9 @@ function M.sync_lsp_config(client, project_path)
       projectPath = project_path or "",
       duo = {
         enabledWithoutGitlabProject = true,
-        workflow = {},
+        workflow = {
+          enabled = true  -- Explicitly enable workflow
+        },
         agentPlatform = {
           enabled = true, -- Enable agent platform
           connectionType = "streaming",
@@ -317,6 +319,7 @@ function M.sync_lsp_config(client, project_path)
         },
       },
       featureFlags = {
+        duoWorkflow = true,  -- Enable DuoWorkflow client feature flag
         duoWorkflowBinary = false,
         useDuoChatUiForFlow = false,
       },
