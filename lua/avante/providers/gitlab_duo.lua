@@ -16,6 +16,29 @@ M.role_map = {
 -- Store active workflows
 M.active_workflows = {}
 
+-- Error status codes from GitLab Duo specification
+M.error_codes = {
+  [1] = "Your request was valid but Workflow failed to complete it. Please try again.",
+  [2] = "Workflow failed to start.",
+  [3] = "Workflow could not use your token to connect to your GitLab instance.",
+  [6] = "Workflow could not connect to the Workflow service.",
+  [50] = "An error occurred while fetching an authentication token for this workflow.",
+  [51] = "GitLab API configuration details are unavailable. Restart your editor and try again.",
+  [52] = "Unsupported connection type for Workflow.",
+}
+
+-- Status indicators for UI
+M.status_icons = {
+  CREATED = "🔵",
+  RUNNING = "⏳",
+  FINISHED = "✅",
+  FAILED = "❌",
+  STOPPED = "⏹️",
+  INPUT_REQUIRED = "❓",
+  PLAN_APPROVAL_REQUIRED = "📋",
+  TOOL_CALL_APPROVAL_REQUIRED = "🔧",
+}
+
 -- Get GitLab LSP client
 ---@return table|nil
 function M.get_gitlab_client()
@@ -384,16 +407,27 @@ function M:parse_curl_args(prompt_opts)
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local content = table.concat(lines, "\n")
   local filepath = vim.api.nvim_buf_get_name(bufnr)
+  local filename = ""
 
   if filepath ~= "" and content ~= "" then
+    filename = vim.fn.fnamemodify(filepath, ":t")
     table.insert(context, {
       category = "file",
       content = content,
       metadata = {
-        file_name = vim.fn.fnamemodify(filepath, ":t"),
+        file_name = filename,
         file_path = filepath,
       },
     })
+  end
+
+  -- Enhance the goal with file context if available
+  if filename ~= "" then
+    -- Always include file context to help the agent understand what file is being referenced
+    if goal:lower():match("this file") or goal:lower():match("explain") or goal:lower():match("what") then
+      goal = goal .. " (file: " .. filename .. ")"
+      Utils.debug("Enhanced goal with file context: " .. goal)
+    end
   end
 
   -- Get project IDs - prioritize config values, then auto-detect from git
@@ -580,14 +614,74 @@ function M:parse_response(ctx, data_stream, event_state, opts)
     M.handle_tool_approval(ctx.workflow_id, chat_log)
   elseif workflow.status == "INPUT_REQUIRED" then
     Utils.debug("parse_response: workflow requires input")
-    -- Handle input request
-    if opts.on_stop then
-      opts.on_stop({
-        reason = "error",
-        error = "Workflow requires additional input",
-      })
-    end
+    -- Handle input request with user prompt
+    M.handle_input_required(ctx.workflow_id, chat_log)
+  elseif workflow.status == "PLAN_APPROVAL_REQUIRED" then
+    Utils.debug("parse_response: workflow requires plan approval")
+    -- Handle plan approval
+    local plan = workflow.checkpoint.channel_values and workflow.checkpoint.channel_values.plan
+    M.handle_plan_approval(ctx.workflow_id, plan)
   end
+end
+
+---Send workflow event to GitLab LSP
+---@param workflow_id string
+---@param event_type string 'pause' | 'resume' | 'stop' | 'message'
+---@param message table|nil Optional message payload
+function M.send_workflow_event(workflow_id, event_type, message)
+  local client = M.get_gitlab_client()
+  if not client then
+    Utils.error("GitLab LSP client not found", { once = true, title = "Avante" })
+    return false
+  end
+
+  local params = {
+    workflowID = workflow_id,
+    eventType = event_type,
+  }
+
+  if message then
+    params.message = message
+  end
+
+  Utils.debug(string.format("Sending workflow event: type=%s, workflow_id=%s", event_type, workflow_id))
+  client.notify("$/gitlab/sendWorkflowEvent", params)
+  return true
+end
+
+---Stop a workflow
+---@param workflow_id string
+function M.stop_workflow(workflow_id)
+  Utils.debug("Stopping workflow: " .. workflow_id)
+  if M.send_workflow_event(workflow_id, "stop") then
+    M.active_workflows[workflow_id] = nil
+  end
+end
+
+---Pause a workflow
+---@param workflow_id string
+function M.pause_workflow(workflow_id)
+  Utils.debug("Pausing workflow: " .. workflow_id)
+  return M.send_workflow_event(workflow_id, "pause")
+end
+
+---Resume a workflow
+---@param workflow_id string
+function M.resume_workflow(workflow_id)
+  Utils.debug("Resuming workflow: " .. workflow_id)
+  return M.send_workflow_event(workflow_id, "resume")
+end
+
+---Send user message to workflow
+---@param workflow_id string
+---@param message string User's message
+---@param correlation_id string|nil Optional correlation ID for responses
+function M.send_user_message(workflow_id, message, correlation_id)
+  Utils.debug(string.format("Sending user message to workflow %s: %s", workflow_id, message))
+  return M.send_workflow_event(workflow_id, "message", {
+    correlation_id = correlation_id or "",
+    message = message,
+  })
 end
 
 ---Handle tool approval requests
@@ -606,21 +700,155 @@ function M.handle_tool_approval(workflow_id, chat_log)
   if not approval_request or not approval_request.tool_info then return end
 
   local tool_name = approval_request.tool_info.name
+  local tool_args = approval_request.tool_info.args or {}
   local correlation_id = approval_request.correlation_id
 
-  -- Auto-approve for now (could be made configurable)
-  local client = M.get_gitlab_client()
-  if client then
-    client.notify("$/gitlab/startWorkflow", {
-      goal = "",
-      existingWorkflowId = workflow_id,
-      toolApproval = {
-        userApproved = true,
-        toolName = tool_name,
-        type = "approve_once",
-      },
-    })
+  -- Prompt user for approval
+  vim.schedule(function()
+    local choices = { "Approve Once", "Approve for Session", "Reject" }
+    local prompt = string.format(
+      "Tool Approval Required:\n\nTool: %s\nArgs: %s\n\nDo you want to approve this tool execution?",
+      tool_name,
+      vim.inspect(tool_args)
+    )
+
+    vim.ui.select(choices, {
+      prompt = prompt,
+      format_item = function(item) return item end,
+    }, function(choice)
+      local client = M.get_gitlab_client()
+      if not client then return end
+
+      if choice == "Approve Once" then
+        client.notify("$/gitlab/startWorkflow", {
+          goal = "",
+          existingWorkflowId = workflow_id,
+          toolApproval = {
+            userApproved = true,
+            toolName = tool_name,
+            type = "approve_once",
+          },
+        })
+        Utils.info("Tool approved: " .. tool_name, { once = true, title = "Avante" })
+      elseif choice == "Approve for Session" then
+        client.notify("$/gitlab/startWorkflow", {
+          goal = "",
+          existingWorkflowId = workflow_id,
+          toolApproval = {
+            userApproved = true,
+            toolName = tool_name,
+            type = "approve-for-session",
+          },
+        })
+        Utils.info("Tool approved for session: " .. tool_name, { once = true, title = "Avante" })
+      else
+        -- Reject
+        client.notify("$/gitlab/startWorkflow", {
+          goal = "",
+          existingWorkflowId = workflow_id,
+          toolApproval = {
+            userApproved = false,
+            message = "User rejected the tool call",
+          },
+        })
+        Utils.info("Tool rejected: " .. tool_name, { once = true, title = "Avante" })
+      end
+    end)
+  end)
+end
+
+---Handle input required requests
+---@param workflow_id string
+---@param chat_log table[]
+function M.handle_input_required(workflow_id, chat_log)
+  -- Find the latest request message that needs input
+  local input_request = nil
+  local correlation_id = nil
+
+  for i = #chat_log, 1, -1 do
+    if chat_log[i].message_type == "request" or chat_log[i].message_type == "agent" then
+      input_request = chat_log[i]
+      correlation_id = chat_log[i].correlation_id
+      break
+    end
   end
+
+  if not input_request then
+    Utils.debug("No input request found in chat log")
+    return
+  end
+
+  -- Prompt user for input
+  vim.schedule(function()
+    vim.ui.input({
+      prompt = "Agent needs input: ",
+      default = "",
+    }, function(input)
+      if input and input ~= "" then
+        M.send_user_message(workflow_id, input, correlation_id)
+        Utils.info("Input sent to workflow", { once = true, title = "Avante" })
+      else
+        Utils.warn("No input provided, workflow may remain blocked", { once = true, title = "Avante" })
+      end
+    end)
+  end)
+end
+
+---Handle plan approval requests
+---@param workflow_id string
+---@param plan table|nil The plan to approve
+function M.handle_plan_approval(workflow_id, plan)
+  if not plan or not plan.steps then
+    Utils.debug("No plan found for approval")
+    return
+  end
+
+  -- Format plan steps for display
+  local plan_lines = { "Agent's Execution Plan:", "" }
+  for i, step in ipairs(plan.steps) do
+    table.insert(plan_lines, string.format("%d. %s", i, vim.inspect(step)))
+  end
+  table.insert(plan_lines, "")
+  table.insert(plan_lines, "Do you want to approve this plan?")
+
+  local plan_text = table.concat(plan_lines, "\n")
+
+  -- Prompt user for approval
+  vim.schedule(function()
+    vim.ui.select({ "Approve", "Reject", "Modify" }, {
+      prompt = plan_text,
+      format_item = function(item) return item end,
+    }, function(choice)
+      if choice == "Approve" then
+        M.send_user_message(workflow_id, "approved", nil)
+        Utils.info("Plan approved", { once = true, title = "Avante" })
+      elseif choice == "Reject" then
+        M.send_user_message(workflow_id, "rejected", nil)
+        Utils.info("Plan rejected", { once = true, title = "Avante" })
+      elseif choice == "Modify" then
+        vim.ui.input({
+          prompt = "Modification request: ",
+          default = "",
+        }, function(modification)
+          if modification and modification ~= "" then
+            M.send_user_message(workflow_id, "modify: " .. modification, nil)
+            Utils.info("Plan modification requested", { once = true, title = "Avante" })
+          end
+        end)
+      end
+    end)
+  end)
+end
+
+---Get error message from error code
+---@param error_code number|nil
+---@param default_message string|nil
+---@return string
+function M.get_error_message(error_code, default_message)
+  if error_code and M.error_codes[error_code] then
+    return M.error_codes[error_code]
+  end
+  return default_message or "An unknown error occurred with the GitLab Duo workflow."
 end
 
 ---Handle errors from GitLab Duo
@@ -629,9 +857,23 @@ function M.on_error(result)
   if not result then return end
 
   local error_msg = "GitLab Duo workflow failed"
+  local error_code = nil
+
   if result.body then
     local ok, body = pcall(vim.json.decode, result.body)
-    if ok and body and body.error then error_msg = body.error end
+    if ok and body then
+      if body.error then
+        error_msg = body.error
+      end
+      if body.error_code or body.errorCode or body.code then
+        error_code = body.error_code or body.errorCode or body.code
+        error_msg = M.get_error_message(error_code, error_msg)
+      end
+    end
+  end
+
+  if error_code then
+    error_msg = string.format("[Error %d] %s", error_code, error_msg)
   end
 
   Utils.error(error_msg, { once = true, title = "Avante" })
