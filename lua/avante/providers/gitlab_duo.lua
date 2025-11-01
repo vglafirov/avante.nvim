@@ -28,30 +28,16 @@ end
 ---@param workflow_id string
 ---@param chat_log table[]
 function M.handle_workflow_message(workflow_id, result)
-  Utils.debug("handle_workflow_message called for workflow_id: " .. workflow_id)
-  Utils.debug("Result keys: " .. vim.inspect(vim.tbl_keys(result)))
-
-  if not result or not result.checkpoint then
-    Utils.debug("handle_workflow_message: missing checkpoint, result.checkpoint=" .. tostring(result.checkpoint))
-    return
-  end
+  if not result or not result.checkpoint then return end
 
   -- Parse the checkpoint
   local ok, checkpoint = pcall(vim.fn.json_decode, result.checkpoint)
   if not ok then
-    Utils.error("Failed to parse workflow checkpoint: " .. tostring(checkpoint), { once = true, title = "Avante" })
+    Utils.error("Failed to parse workflow checkpoint", { once = true, title = "Avante" })
     return
   end
 
   local chat_log = checkpoint.channel_values and checkpoint.channel_values.ui_chat_log or {}
-  Utils.debug(
-    "handle_workflow_message: status="
-      .. tostring(result.workflowStatus)
-      .. ", chat_log size="
-      .. #chat_log
-      .. ", errors="
-      .. vim.inspect(result.errors or {})
-  )
 
   -- Store workflow state
   M.active_workflows[workflow_id] = {
@@ -188,36 +174,9 @@ function M:parse_curl_args(prompt_opts)
   end)
 
   local workflow_id
-  if success and result then
-    if result.err then
-      -- Handle LSP request error
-      local error_msg = "GitLab Duo workflow failed to start"
-      if result.err.message then
-        error_msg = error_msg .. ": " .. result.err.message
-      end
-
-      -- Check for common error messages
-      if result.err.message and result.err.message:match("Duo Agent Platform") then
-        error_msg = error_msg .. "\n\nThis error usually means:\n"
-          .. "1. Your GitLab instance doesn't have Duo Agent Platform enabled\n"
-          .. "2. Your project doesn't have access to Duo features\n"
-          .. "3. You need to upgrade your GitLab subscription\n\n"
-          .. "Please contact your GitLab administrator or check GitLab documentation."
-      end
-
-      Utils.error(error_msg, { once = true, title = "Avante" })
-      return nil
-    end
-
-    if result.result then
-      workflow_id = result.result.workflowId or result.result.workflow_id
-      Utils.debug("GitLab Duo workflow started with ID: " .. tostring(workflow_id))
-    end
-  elseif not success then
-    -- Handle pcall failure
-    local error_msg = "Failed to start GitLab Duo workflow: " .. tostring(result)
-    Utils.error(error_msg, { once = true, title = "Avante" })
-    return nil
+  if success and result and result.result then
+    workflow_id = result.result.workflowId or result.result.workflow_id
+    Utils.debug("GitLab Duo workflow started with ID: " .. tostring(workflow_id))
   end
 
   -- Fallback: generate local ID if GitLab doesn't return one
@@ -226,14 +185,7 @@ function M:parse_curl_args(prompt_opts)
     Utils.debug("Using fallback workflow ID: " .. workflow_id)
 
     -- Still send the workflow start notification
-    local notify_success, notify_err = pcall(function()
-      client.notify("$/gitlab/startWorkflow", workflow_params)
-    end)
-
-    if not notify_success then
-      Utils.error("Failed to send workflow notification: " .. tostring(notify_err), { once = true, title = "Avante" })
-      return nil
-    end
+    client.notify("$/gitlab/startWorkflow", workflow_params)
   end
 
   -- Store workflow ID for tracking
@@ -401,20 +353,13 @@ end
 function M.setup()
   -- Schedule the setup to run after LSP clients are initialized
   vim.schedule(function()
-    Utils.debug("GitLab Duo setup: checking for LSP client...")
     local client = M.get_gitlab_client()
     if not client then
-      Utils.debug("GitLab Duo setup: gitlab_code_suggestions client not found, waiting for LspAttach...")
       -- LSP client not available yet, set up an autocmd to register handlers later
       vim.api.nvim_create_autocmd("LspAttach", {
         callback = function(args)
-          Utils.debug("GitLab Duo setup: LspAttach event fired, checking client...")
           local attached_client = vim.lsp.get_client_by_id(args.data.client_id)
-          if attached_client then
-            Utils.debug("GitLab Duo setup: LspAttach - client name=" .. (attached_client.name or "nil"))
-          end
           if attached_client and attached_client.name == "gitlab_code_suggestions" then
-            Utils.debug("GitLab Duo setup: Found gitlab_code_suggestions client, registering handlers...")
             M._register_handlers(attached_client)
             return true -- Remove the autocmd after successful registration
           end
@@ -423,7 +368,6 @@ function M.setup()
       return
     end
 
-    Utils.debug("GitLab Duo setup: gitlab_code_suggestions client found, registering handlers...")
     M._register_handlers(client)
   end)
 end

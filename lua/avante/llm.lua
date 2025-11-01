@@ -531,7 +531,9 @@ function M.curl(opts)
   end
 
   -- Handle LSP-based providers (e.g., gitlab_duo)
+  ---@diagnostic disable-next-line: undefined-field
   if spec.is_lsp_provider then
+    ---@diagnostic disable-next-line: undefined-field
     local turn_ctx = {
       workflow_id = spec.workflow_id,
       turn_id = Utils.uuid(),
@@ -541,33 +543,49 @@ function M.curl(opts)
     -- For LSP providers, we need to poll for responses since they come via LSP notifications
     -- The provider's parse_response will handle checking for new messages
     local poll_timer = vim.loop.new_timer()
+    if not poll_timer then
+      handler_opts.on_stop({ reason = "error", error = "Failed to create timer for LSP provider" })
+      return
+    end
+
     local poll_count = 0
     local max_polls = 600 -- 5 minutes max (600 * 500ms)
+    local polling_stopped = false
 
     if handler_opts.on_start then
-      handler_opts.on_start()
+      pcall(handler_opts.on_start)
     end
 
     poll_timer:start(500, 500, vim.schedule_wrap(function()
+      if polling_stopped then return end
+
       poll_count = poll_count + 1
 
       -- Check if we should stop polling
       if poll_count > max_polls then
-        poll_timer:stop()
-        poll_timer:close()
-        handler_opts.on_stop({ reason = "timeout" })
+        polling_stopped = true
+        if poll_timer and not poll_timer:is_closing() then
+          poll_timer:stop()
+          poll_timer:close()
+        end
+        handler_opts.on_stop({ reason = "error", error = "LSP provider timeout after 5 minutes" })
         return
       end
 
       -- Let the provider check for new messages and call the appropriate callbacks
-      provider:parse_response(turn_ctx, "", nil, handler_opts)
+      if provider.parse_response then
+        pcall(provider.parse_response, provider, turn_ctx, "", nil, handler_opts)
+      end
 
       -- Check if workflow is complete
-      local workflow = provider.active_workflows and provider.active_workflows[turn_ctx.workflow_id]
-      if workflow then
-        if workflow.status == "FINISHED" or workflow.status == "FAILED" then
-          poll_timer:stop()
-          poll_timer:close()
+      if provider.active_workflows and turn_ctx.workflow_id then
+        local workflow = provider.active_workflows[turn_ctx.workflow_id]
+        if workflow and (workflow.status == "FINISHED" or workflow.status == "FAILED") then
+          polling_stopped = true
+          if poll_timer and not poll_timer:is_closing() then
+            poll_timer:stop()
+            poll_timer:close()
+          end
         end
       end
     end))
