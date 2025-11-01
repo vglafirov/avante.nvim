@@ -21,9 +21,7 @@ M.active_workflows = {}
 function M.get_gitlab_client()
   for _, client in ipairs(vim.lsp.get_active_clients()) do
     -- Support both gitlab_lsp and gitlab_code_suggestions client names
-    if client.name == "gitlab_lsp" or client.name == "gitlab_code_suggestions" then
-      return client
-    end
+    if client.name == "gitlab_lsp" or client.name == "gitlab_code_suggestions" then return client end
   end
   return nil
 end
@@ -154,11 +152,7 @@ function M.query_gitlab_project(project_path)
   Utils.debug("Querying GitLab API: " .. api_url)
 
   -- Use curl to query the API
-  local curl_cmd = string.format(
-    "curl -s -H 'PRIVATE-TOKEN: %s' '%s'",
-    token,
-    api_url
-  )
+  local curl_cmd = string.format("curl -s -H 'PRIVATE-TOKEN: %s' '%s'", token, api_url)
 
   local result = vim.fn.system(curl_cmd)
   local exit_code = vim.v.shell_error
@@ -296,6 +290,46 @@ function M:parse_messages(opts)
   return messages
 end
 
+---Sync configuration with GitLab LSP
+---@param client table LSP client
+---@param project_path string|nil Project path (namespace/project)
+function M.sync_lsp_config(client, project_path)
+  local token, base_url = M.get_gitlab_credentials()
+
+  if not token then
+    Utils.debug("Cannot sync LSP config: no token available")
+    return
+  end
+
+  -- Build ClientConfig payload similar to VS Code extension
+  local config = {
+    settings = {
+      baseUrl = base_url,
+      token = token,
+      projectPath = project_path or "",
+      duo = {
+        enabledWithoutGitlabProject = true,
+        workflow = {},
+        agentPlatform = {
+          enabled = true, -- Enable agent platform
+          connectionType = "streaming",
+          defaultNamespace = "",
+        },
+      },
+      featureFlags = {
+        duoWorkflowBinary = false,
+        useDuoChatUiForFlow = false,
+      },
+    },
+  }
+
+  Utils.debug("Syncing LSP configuration...")
+  Utils.debug("Config: " .. vim.inspect(config))
+
+  -- Send workspace/didChangeConfiguration notification
+  client.notify("workspace/didChangeConfiguration", config)
+end
+
 ---This function is called by avante.nvim to start the workflow
 ---@param prompt_opts AvantePromptOptions
 ---@return AvanteCurlOutput|nil
@@ -398,6 +432,16 @@ function M:parse_curl_args(prompt_opts)
   if namespace_id then
     metadata.namespaceId = namespace_id
     Utils.debug("Using namespaceId: " .. tostring(namespace_id))
+  end
+
+  -- Sync configuration with LSP before starting workflow
+  -- This is critical - the LSP needs to know about the project and have agent platform enabled
+  local project_path = M.get_current_project_path()
+  if project_path then
+    Utils.debug("Syncing LSP configuration with project path: " .. project_path)
+    M.sync_lsp_config(client, project_path)
+    -- Give LSP a moment to process the configuration
+    vim.wait(100)
   end
 
   -- Start the workflow via LSP request (not notify) to get the workflow ID back
