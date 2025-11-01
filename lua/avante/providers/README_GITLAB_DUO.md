@@ -20,7 +20,7 @@ Add the following to your Neovim configuration:
 
 ```lua
 require('lspconfig').gitlab_lsp.setup({
-  cmd = { "gitlab_lsp", "--stdio" },
+  cmd = { "gitlab-lsp", "--stdio" },
   settings = {
     gitlab = {
       baseUrl = "https://gitlab.com", -- or your GitLab instance URL
