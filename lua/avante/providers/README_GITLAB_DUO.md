@@ -57,9 +57,17 @@ Supported models depend on your GitLab instance configuration.
 
 The GitLab project ID to associate with the workflow. This provides project-specific context to the AI agent.
 
+**Auto-detection**: If not specified, the provider will automatically detect the project from your git remote URL. The provider supports both:
+- Numeric project IDs (e.g., `"12345"`)
+- Project paths (e.g., `"gitlab-org/gitlab"`)
+
+**Note**: Auto-detection works by parsing the git remote URL of the current buffer's repository. If you're not in a GitLab repository or want to use a specific project, set this explicitly.
+
 ### `namespace_id` (string, optional)
 
 The GitLab namespace ID to use for the workflow. This can be a group or user namespace.
+
+**Note**: This is typically only needed if you want to override the namespace detected from the project path.
 
 ### `timeout` (number)
 
@@ -113,6 +121,36 @@ Ensure gitlab-lsp is:
 1. Installed correctly
 2. Running (check `:LspInfo`)
 3. Attached to the current buffer
+
+### \"Duo Agent Platform feature is not enabled\"
+
+This error typically means the workflow request is missing valid project context. To fix:
+
+1. **Ensure you're in a GitLab repository**: The provider auto-detects the project from your git remote URL
+   ```bash
+   git remote -v
+   ```
+   Should show a GitLab URL (e.g., `https://gitlab.com/namespace/project.git` or `git@gitlab.com:namespace/project.git`)
+
+2. **Manually specify project_id**: If auto-detection doesn't work, set it explicitly in your config:
+   ```lua
+   providers = {
+     gitlab_duo = {
+       project_id = "gitlab-org/gitlab", -- or numeric ID like "278964"
+     },
+   }
+   ```
+
+3. **Check GitLab Duo is enabled**: Ensure your GitLab instance and project have Duo features enabled
+
+4. **Enable debug mode** to see what's being sent:
+   ```lua
+   require('avante').setup({
+     debug = true,
+     provider = "gitlab_duo",
+   })
+   ```
+   Then check `:messages` for debug output showing the detected project
 
 ### "Workflow failed to start"
 

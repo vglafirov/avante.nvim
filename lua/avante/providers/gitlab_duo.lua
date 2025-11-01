@@ -28,6 +28,79 @@ function M.get_gitlab_client()
   return nil
 end
 
+---Get git remote URL for the current buffer's directory
+---@return string|nil
+function M.get_git_remote_url()
+  local filepath = vim.api.nvim_buf_get_name(0)
+  if filepath == "" then return nil end
+
+  local dir = vim.fn.fnamemodify(filepath, ":h")
+  local handle = io.popen("cd " .. vim.fn.shellescape(dir) .. " && git remote get-url origin 2>/dev/null")
+  if not handle then return nil end
+
+  local result = handle:read("*a")
+  handle:close()
+
+  if result and result ~= "" then return vim.trim(result) end
+  return nil
+end
+
+---Parse GitLab namespace and project from git remote URL
+---@param remote_url string
+---@return string|nil namespace
+---@return string|nil project
+function M.parse_gitlab_remote(remote_url)
+  if not remote_url then return nil, nil end
+
+  -- Handle HTTPS URLs: https://gitlab.com/namespace/project.git
+  local https_match = remote_url:match("https?://[^/]+/(.+)/([^/]+)%.git$")
+  if https_match then
+    local parts = vim.split(remote_url:match("https?://[^/]+/(.+)%.git$"), "/")
+    if #parts >= 2 then
+      local project = parts[#parts]
+      table.remove(parts, #parts)
+      local namespace = table.concat(parts, "/")
+      return namespace, project
+    end
+  end
+
+  -- Handle SSH URLs: git@gitlab.com:namespace/project.git
+  local ssh_match = remote_url:match("git@[^:]+:(.+)%.git$")
+  if ssh_match then
+    local parts = vim.split(ssh_match, "/")
+    if #parts >= 2 then
+      local project = parts[#parts]
+      table.remove(parts, #parts)
+      local namespace = table.concat(parts, "/")
+      return namespace, project
+    end
+  end
+
+  return nil, nil
+end
+
+---Get GitLab project path (namespace/project) from current git repository
+---@return string|nil
+function M.get_current_project_path()
+  local remote_url = M.get_git_remote_url()
+  if not remote_url then
+    Utils.debug("No git remote URL found")
+    return nil
+  end
+
+  Utils.debug("Git remote URL: " .. remote_url)
+
+  local namespace, project = M.parse_gitlab_remote(remote_url)
+  if namespace and project then
+    local project_path = namespace .. "/" .. project
+    Utils.debug("Detected GitLab project path: " .. project_path)
+    return project_path
+  end
+
+  Utils.debug("Could not parse GitLab project from remote URL")
+  return nil
+end
+
 ---@param workflow_id string
 ---@param result table
 function M.handle_workflow_message(workflow_id, result)
@@ -179,18 +252,48 @@ function M:parse_curl_args(prompt_opts)
     })
   end
 
+  -- Get project path from git repository or config
+  local project_path = M.get_current_project_path()
+  local project_id = provider_conf.project_id
+  local namespace_id = provider_conf.namespace_id
+
+  -- If we have a project path and no explicit IDs, use the path format
+  -- GitLab API accepts both numeric IDs and "namespace/project" format
+  if project_path and not project_id then
+    -- Use the full path as project identifier (GitLab accepts this format)
+    project_id = project_path
+    Utils.debug("Using auto-detected project path: " .. project_path)
+  end
+
+  -- Build metadata - only include fields that have values
+  local metadata = {
+    selectedModelIdentifier = provider_conf.model,
+  }
+
+  if project_id then
+    metadata.projectId = project_id
+    Utils.debug("Using projectId: " .. tostring(project_id))
+  else
+    Utils.warn(
+      "No GitLab project detected. Workflow may fail. Please set project_id in config or ensure you're in a GitLab repository.",
+      { once = true, title = "Avante" }
+    )
+  end
+
+  if namespace_id then
+    metadata.namespaceId = namespace_id
+    Utils.debug("Using namespaceId: " .. tostring(namespace_id))
+  end
+
   -- Start the workflow via LSP request (not notify) to get the workflow ID back
   local workflow_params = {
     goal = goal,
-    metadata = {
-      projectId = provider_conf.project_id,
-      namespaceId = provider_conf.namespace_id,
-      selectedModelIdentifier = provider_conf.model,
-    },
+    metadata = metadata,
     additionalContext = context,
   }
 
   Utils.debug("Starting GitLab Duo workflow with goal: " .. goal)
+  Utils.debug("Workflow params: " .. vim.inspect(workflow_params))
 
   -- Use request to get the workflow ID synchronously
   local success, result = pcall(
