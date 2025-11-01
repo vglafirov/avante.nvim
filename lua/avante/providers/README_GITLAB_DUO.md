@@ -6,7 +6,8 @@ This provider integrates GitLab Duo's Agentic Platform with Avante.nvim through 
 
 1. **GitLab Language Server (gitlab-lsp)**: Must be installed and configured in your Neovim setup
 2. **GitLab Account**: With access to GitLab Duo features
-3. **GitLab Token**: Configured in gitlab-lsp with appropriate permissions
+3. **GitLab Token**: Configured as `GITLAB_TOKEN` environment variable
+4. **Docker**: Required for workflow execution (see [Docker Setup](#docker-setup))
 
 ## Installation
 
@@ -128,7 +129,105 @@ The agent can execute commands in your terminal through the LSP protocol. Comman
 
 Responses from the GitLab Duo agent are streamed in real-time, providing immediate feedback as the agent works.
 
+## Docker Setup
+
+GitLab Duo Workflow requires Docker to execute workflows. The provider automatically detects Docker socket paths on macOS and Linux.
+
+### Automatic Detection
+
+The provider automatically checks these locations:
+
+**macOS:**
+- `~/.colima/default/docker.sock` (Colima)
+- `~/.rd/docker.sock` (Rancher Desktop)
+- `~/.docker/run/docker.sock` (Docker Desktop)
+- `/var/run/docker.sock` (Standard)
+
+**Linux:**
+- `/var/run/docker.sock` (Standard)
+- `~/.docker/desktop/docker.sock` (Docker Desktop)
+
+### Manual Configuration
+
+If auto-detection doesn't work, set the Docker socket path manually:
+
+```bash
+export GITLAB_DOCKER_SOCKET="/path/to/docker.sock"
+```
+
+**Common paths:**
+```bash
+# Colima (macOS)
+export GITLAB_DOCKER_SOCKET="$HOME/.colima/default/docker.sock"
+
+# Rancher Desktop (macOS)
+export GITLAB_DOCKER_SOCKET="$HOME/.rd/docker.sock"
+
+# Docker Desktop (macOS)
+export GITLAB_DOCKER_SOCKET="$HOME/.docker/run/docker.sock"
+
+# Standard Docker (Linux)
+export GITLAB_DOCKER_SOCKET="/var/run/docker.sock"
+```
+
+### Installing Docker
+
+**macOS (Colima - Recommended):**
+```bash
+brew install colima docker
+colima start
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get install docker.io
+sudo systemctl start docker
+sudo usermod -aG docker $USER
+```
+
+For detailed Docker setup instructions, see [DOCKER_SETUP.md](DOCKER_SETUP.md).
+
+### Docker Not Available
+
+If Docker is not available, you'll see a warning:
+```
+Docker socket not found. Workflow may have limited functionality.
+```
+
+**What works without Docker:**
+- Basic chat interactions
+- Code explanations
+- Simple suggestions
+
+**What requires Docker:**
+- Complex workflows
+- Tool execution
+- Code generation and testing
+
 ## Troubleshooting
+
+### \"Docker socket not configured\"
+
+This error means the provider couldn't find Docker. To fix:
+
+1. **Install Docker** (see [Docker Setup](#docker-setup))
+2. **Start Docker:**
+   ```bash
+   # Colima
+   colima start
+
+   # Standard Docker
+   sudo systemctl start docker
+   ```
+3. **Verify Docker is running:**
+   ```bash
+   docker ps
+   ```
+4. **Set Docker socket path manually** if auto-detection fails:
+   ```bash
+   export GITLAB_DOCKER_SOCKET="/path/to/docker.sock"
+   ```
+5. **Restart Neovim** to pick up the environment variable
 
 ### "GitLab LSP client not found"
 

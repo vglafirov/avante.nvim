@@ -313,6 +313,55 @@ function M:parse_messages(opts)
   return messages
 end
 
+---Get Docker socket path based on OS and container manager
+---@return string|nil
+function M.get_docker_socket_path()
+  -- Check if user has configured a custom Docker socket path
+  local custom_socket = vim.env.GITLAB_DOCKER_SOCKET
+  if custom_socket then
+    Utils.debug("Using custom Docker socket from GITLAB_DOCKER_SOCKET: " .. custom_socket)
+    return custom_socket
+  end
+
+  -- Auto-detect Docker socket based on OS
+  local is_mac = vim.fn.has("mac") == 1 or vim.fn.has("macunix") == 1
+  local is_linux = vim.fn.has("unix") == 1 and not is_mac
+  local home = vim.fn.expand("~")
+
+  if is_mac then
+    -- Try common macOS Docker socket locations
+    local mac_sockets = {
+      home .. "/.colima/default/docker.sock",  -- Colima
+      home .. "/.rd/docker.sock",              -- Rancher Desktop
+      home .. "/.docker/run/docker.sock",      -- Docker Desktop
+      "/var/run/docker.sock",                  -- Standard location
+    }
+
+    for _, socket in ipairs(mac_sockets) do
+      if vim.fn.filereadable(socket) == 1 then
+        Utils.debug("Found Docker socket at: " .. socket)
+        return socket
+      end
+    end
+  elseif is_linux then
+    -- Try common Linux Docker socket locations
+    local linux_sockets = {
+      "/var/run/docker.sock",                  -- Standard location
+      home .. "/.docker/desktop/docker.sock",  -- Docker Desktop on Linux
+    }
+
+    for _, socket in ipairs(linux_sockets) do
+      if vim.fn.filereadable(socket) == 1 then
+        Utils.debug("Found Docker socket at: " .. socket)
+        return socket
+      end
+    end
+  end
+
+  Utils.debug("No Docker socket found")
+  return nil
+end
+
 ---Sync configuration with GitLab LSP
 ---@param client table LSP client
 ---@param project_path string|nil Project path (namespace/project)
@@ -324,6 +373,17 @@ function M.sync_lsp_config(client, project_path)
     return
   end
 
+  -- Get Docker socket path
+  local docker_socket = M.get_docker_socket_path()
+  local use_docker = docker_socket ~= nil
+
+  if not use_docker then
+    Utils.warn(
+      "Docker socket not found. Workflow may have limited functionality. Set GITLAB_DOCKER_SOCKET env var to specify Docker socket path.",
+      { once = true, title = "Avante" }
+    )
+  end
+
   -- Build ClientConfig payload similar to VS Code extension
   local config = {
     settings = {
@@ -333,7 +393,9 @@ function M.sync_lsp_config(client, project_path)
       duo = {
         enabledWithoutGitlabProject = true,
         workflow = {
-          enabled = true  -- Explicitly enable workflow
+          enabled = true,  -- Explicitly enable workflow
+          dockerSocket = docker_socket or "",
+          useDocker = use_docker,
         },
         agentPlatform = {
           enabled = true, -- Enable agent platform
@@ -350,6 +412,8 @@ function M.sync_lsp_config(client, project_path)
   }
 
   Utils.debug("Syncing LSP configuration...")
+  Utils.debug("Docker socket: " .. tostring(docker_socket))
+  Utils.debug("Use Docker: " .. tostring(use_docker))
   Utils.debug("Config: " .. vim.inspect(config))
 
   -- Send workspace/didChangeConfiguration notification
