@@ -20,24 +20,48 @@ M.active_workflows = {}
 ---@return table|nil
 function M.get_gitlab_client()
   for _, client in ipairs(vim.lsp.get_active_clients()) do
-    if client.name == "gitlab_lsp" then return client end
+    -- Support both gitlab_lsp and gitlab_code_suggestions client names
+    if client.name == "gitlab_lsp" or client.name == "gitlab_code_suggestions" then
+      return client
+    end
   end
   return nil
 end
 
 ---@param workflow_id string
----@param chat_log table[]
+---@param result table
 function M.handle_workflow_message(workflow_id, result)
-  if not result or not result.checkpoint then return end
+  Utils.debug("handle_workflow_message called for workflow_id: " .. workflow_id)
+  Utils.debug("Result keys: " .. vim.inspect(vim.tbl_keys(result)))
+
+  -- Check if this is an error response instead of a workflow update
+  if result.type == "error" and result.message then
+    Utils.error("GitLab Duo error: " .. result.message, { once = true, title = "Avante" })
+    Utils.debug("Error response from GitLab: " .. vim.inspect(result))
+    return
+  end
+
+  if not result or not result.checkpoint then
+    Utils.debug("handle_workflow_message: missing checkpoint, result.checkpoint=" .. tostring(result.checkpoint))
+    return
+  end
 
   -- Parse the checkpoint
   local ok, checkpoint = pcall(vim.fn.json_decode, result.checkpoint)
   if not ok then
-    Utils.error("Failed to parse workflow checkpoint", { once = true, title = "Avante" })
+    Utils.error("Failed to parse workflow checkpoint: " .. tostring(checkpoint), { once = true, title = "Avante" })
     return
   end
 
   local chat_log = checkpoint.channel_values and checkpoint.channel_values.ui_chat_log or {}
+  Utils.debug(
+    "handle_workflow_message: status="
+      .. tostring(result.workflowStatus)
+      .. ", chat_log size="
+      .. #chat_log
+      .. ", errors="
+      .. vim.inspect(result.errors or {})
+  )
 
   -- Store workflow state
   M.active_workflows[workflow_id] = {
