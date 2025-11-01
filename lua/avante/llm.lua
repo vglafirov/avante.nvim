@@ -530,6 +530,69 @@ function M.curl(opts)
     return
   end
 
+  -- Handle LSP-based providers (e.g., gitlab_duo)
+  ---@diagnostic disable-next-line: undefined-field
+  if spec.is_lsp_provider then
+    ---@diagnostic disable-next-line: undefined-field
+    local turn_ctx = {
+      workflow_id = spec.workflow_id,
+      turn_id = Utils.uuid(),
+      last_chat_index = 0,
+    }
+
+    -- For LSP providers, we need to poll for responses since they come via LSP notifications
+    -- The provider's parse_response will handle checking for new messages
+    local poll_timer = vim.loop.new_timer()
+    if not poll_timer then
+      handler_opts.on_stop({ reason = "error", error = "Failed to create timer for LSP provider" })
+      return
+    end
+
+    local poll_count = 0
+    local max_polls = 600 -- 5 minutes max (600 * 500ms)
+    local polling_stopped = false
+
+    if handler_opts.on_start then
+      pcall(handler_opts.on_start)
+    end
+
+    poll_timer:start(500, 500, vim.schedule_wrap(function()
+      if polling_stopped then return end
+
+      poll_count = poll_count + 1
+
+      -- Check if we should stop polling
+      if poll_count > max_polls then
+        polling_stopped = true
+        if poll_timer and not poll_timer:is_closing() then
+          poll_timer:stop()
+          poll_timer:close()
+        end
+        handler_opts.on_stop({ reason = "error", error = "LSP provider timeout after 5 minutes" })
+        return
+      end
+
+      -- Let the provider check for new messages and call the appropriate callbacks
+      if provider.parse_response then
+        pcall(provider.parse_response, provider, turn_ctx, "", nil, handler_opts)
+      end
+
+      -- Check if workflow is complete
+      if provider.active_workflows and turn_ctx.workflow_id then
+        local workflow = provider.active_workflows[turn_ctx.workflow_id]
+        if workflow and (workflow.status == "FINISHED" or workflow.status == "FAILED") then
+          polling_stopped = true
+          if poll_timer and not poll_timer:is_closing() then
+            poll_timer:stop()
+            poll_timer:close()
+          end
+        end
+      end
+    end))
+
+    return
+  end
+
   ---@type string
   local current_event_state = nil
   local turn_ctx = {}
