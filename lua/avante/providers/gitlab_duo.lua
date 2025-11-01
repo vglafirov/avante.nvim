@@ -96,6 +96,9 @@ end
 ---@param prompt_opts AvantePromptOptions
 ---@return AvanteCurlOutput|nil
 function M:parse_curl_args(prompt_opts)
+  -- Ensure LSP handlers are registered first
+  M.setup()
+
   local client = self.get_gitlab_client()
   if not client then
     Utils.error("GitLab LSP client not found. Please ensure gitlab_code_suggestions is running.", {
@@ -152,11 +155,8 @@ function M:parse_curl_args(prompt_opts)
     })
   end
 
-  -- Generate a unique workflow ID
-  local workflow_id = "avante_" .. os.time() .. "_" .. math.random(1000, 9999)
-
-  -- Start the workflow via LSP notification
-  client.notify("$/gitlab/startWorkflow", {
+  -- Start the workflow via LSP request (not notify) to get the workflow ID back
+  local workflow_params = {
     goal = goal,
     metadata = {
       projectId = provider_conf.project_id,
@@ -164,15 +164,39 @@ function M:parse_curl_args(prompt_opts)
       selectedModelIdentifier = provider_conf.model,
     },
     additionalContext = context,
-  })
+  }
+
+  Utils.debug("Starting GitLab Duo workflow with goal: " .. goal)
+
+  -- Use request to get the workflow ID synchronously
+  local success, result = pcall(function()
+    return client.request_sync("$/gitlab/startWorkflow", workflow_params, 5000, bufnr)
+  end)
+
+  local workflow_id
+  if success and result and result.result then
+    workflow_id = result.result.workflowId or result.result.workflow_id
+    Utils.debug("GitLab Duo workflow started with ID: " .. tostring(workflow_id))
+  end
+
+  -- Fallback: generate local ID if GitLab doesn't return one
+  if not workflow_id then
+    workflow_id = "avante_" .. os.time() .. "_" .. math.random(1000, 9999)
+    Utils.debug("Using fallback workflow ID: " .. workflow_id)
+
+    -- Still send the workflow start notification
+    client.notify("$/gitlab/startWorkflow", workflow_params)
+  end
 
   -- Store workflow ID for tracking
   M.active_workflows[workflow_id] = {
-    status = "CREATED",
+    status = "RUNNING",
     goal = goal,
     errors = {},
     chat_log = {},
   }
+
+  Utils.debug("Active workflows: " .. vim.inspect(vim.tbl_keys(M.active_workflows)))
 
   -- Return a special marker that tells avante this is an LSP-based provider
   return {
@@ -191,20 +215,36 @@ function M:parse_response(ctx, data_stream, event_state, opts)
   -- This function is called by avante's streaming handler but we handle
   -- the actual responses in the LSP notification handler
 
-  if not ctx.workflow_id then return end
+  if not ctx.workflow_id then
+    Utils.debug("parse_response: no workflow_id in context")
+    return
+  end
 
   local workflow = M.active_workflows[ctx.workflow_id]
-  if not workflow then return end
+  if not workflow then
+    Utils.debug("parse_response: workflow not found for ID: " .. ctx.workflow_id)
+    Utils.debug("Active workflows: " .. vim.inspect(vim.tbl_keys(M.active_workflows)))
+    return
+  end
+
+  Utils.debug(
+    "parse_response: workflow status=" .. tostring(workflow.status) .. ", chat_log size=" .. #(workflow.chat_log or {})
+  )
 
   -- Check if there are new messages in the chat log
   local chat_log = workflow.chat_log or {}
   local last_index = ctx.last_chat_index or 0
+
+  if #chat_log > last_index then
+    Utils.debug("parse_response: processing " .. (#chat_log - last_index) .. " new messages")
+  end
 
   for i = last_index + 1, #chat_log do
     local msg = chat_log[i]
 
     if msg.message_type == "agent" then
       -- Agent message - stream the content
+      Utils.debug("parse_response: agent message, length=" .. #(msg.content or ""))
       if opts.on_chunk then opts.on_chunk(msg.content) end
 
       if opts.on_messages_add then
@@ -218,12 +258,14 @@ function M:parse_response(ctx, data_stream, event_state, opts)
       -- Tool execution message
       local tool_name = msg.tool_info and msg.tool_info.name or "unknown"
       local tool_content = string.format("\n[Tool: %s]\n%s\n", tool_name, msg.content)
+      Utils.debug("parse_response: tool message, tool=" .. tool_name)
 
       if opts.on_chunk then opts.on_chunk(tool_content) end
     elseif msg.message_type == "request" then
       -- Tool approval request
       if msg.tool_info then
         local approval_msg = string.format("\n[Approval Required for: %s]\n%s\n", msg.tool_info.name, msg.content)
+        Utils.debug("parse_response: approval request, tool=" .. msg.tool_info.name)
         if opts.on_chunk then opts.on_chunk(approval_msg) end
       end
     end
@@ -233,8 +275,10 @@ function M:parse_response(ctx, data_stream, event_state, opts)
 
   -- Check workflow status
   if workflow.status == "FINISHED" then
+    Utils.debug("parse_response: workflow FINISHED")
     if opts.on_stop then opts.on_stop({ reason = "complete" }) end
   elseif workflow.status == "FAILED" then
+    Utils.debug("parse_response: workflow FAILED, errors=" .. vim.inspect(workflow.errors))
     if opts.on_stop then
       opts.on_stop({
         reason = "error",
@@ -242,14 +286,16 @@ function M:parse_response(ctx, data_stream, event_state, opts)
       })
     end
   elseif workflow.status == "TOOL_CALL_APPROVAL_REQUIRED" then
+    Utils.debug("parse_response: workflow requires tool approval")
     -- Handle tool approval
     M.handle_tool_approval(ctx.workflow_id, chat_log)
   elseif workflow.status == "INPUT_REQUIRED" then
+    Utils.debug("parse_response: workflow requires input")
     -- Handle input request
     if opts.on_stop then
       opts.on_stop({
-        reason = "input_required",
-        message = "Workflow requires additional input",
+        reason = "error",
+        error = "Workflow requires additional input",
       })
     end
   end
@@ -329,9 +375,13 @@ end
 ---Register LSP handlers for GitLab Duo
 ---@param client table LSP client
 function M._register_handlers(client)
+  Utils.debug("Registering GitLab Duo LSP handlers...")
+
   -- Register handler for workflow messages
   if not client.handlers["$/gitlab/workflowMessage"] then
     client.handlers["$/gitlab/workflowMessage"] = function(err, result, ctx)
+      Utils.debug("Received $/gitlab/workflowMessage notification")
+
       if err then
         Utils.error("GitLab Duo workflow error: " .. vim.inspect(err), {
           once = true,
@@ -340,30 +390,47 @@ function M._register_handlers(client)
         return
       end
 
+      Utils.debug("Workflow message result: " .. vim.inspect(result))
+
       -- Extract workflow ID from the result or context
       -- The workflow ID might be in different places depending on how it's sent
       local workflow_id = result.workflowId or result.workflow_id
       if not workflow_id then
+        Utils.debug("No workflow ID in result, trying to match by goal")
         -- Try to find it from our active workflows
         for id, workflow in pairs(M.active_workflows) do
           if workflow.goal == result.workflowGoal then
             workflow_id = id
+            Utils.debug("Matched workflow by goal: " .. id)
             break
           end
         end
+      else
+        Utils.debug("Found workflow ID: " .. workflow_id)
       end
 
-      if workflow_id then M.handle_workflow_message(workflow_id, result) end
+      if workflow_id then
+        M.handle_workflow_message(workflow_id, result)
+      else
+        Utils.debug("Could not determine workflow ID for message")
+      end
     end
+    Utils.debug("Registered handler for $/gitlab/workflowMessage")
+  else
+    Utils.debug("Handler for $/gitlab/workflowMessage already registered")
   end
 
   -- Register handler for command execution requests
   if not client.handlers["$/gitlab/runCommand"] then
     client.handlers["$/gitlab/runCommand"] = function(err, params, ctx)
+      Utils.debug("Received $/gitlab/runCommand request")
+
       if err then return { exitCode = 1, output = "Error: " .. vim.inspect(err) } end
 
       local command = params.command
       local args = params.args or {}
+
+      Utils.debug("Executing command: " .. command .. " " .. vim.inspect(args))
 
       -- Execute command using Neovim's job API
       local output = {}
@@ -382,11 +449,16 @@ function M._register_handlers(client)
       -- Wait for job to complete
       vim.fn.jobwait({ job_id }, -1)
 
+      Utils.debug("Command completed with exit code: " .. exit_code)
+
       return {
         exitCode = exit_code,
         output = table.concat(output, "\n"),
       }
     end
+    Utils.debug("Registered handler for $/gitlab/runCommand")
+  else
+    Utils.debug("Handler for $/gitlab/runCommand already registered")
   end
 
   Utils.info("GitLab Duo LSP handlers registered", { once = true, title = "Avante" })
