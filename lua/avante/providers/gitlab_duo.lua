@@ -229,7 +229,7 @@ end
 ---@param result table
 function M.handle_workflow_message(workflow_id, result)
   Utils.debug("handle_workflow_message called for workflow_id: " .. workflow_id)
-  Utils.debug("Result keys: " .. vim.inspect(vim.tbl_keys(result)))
+  Utils.debug("Result full structure: " .. vim.inspect(result))
 
   -- Check if this is an error response instead of a workflow update
   if result.type == "error" and result.message then
@@ -251,19 +251,37 @@ function M.handle_workflow_message(workflow_id, result)
   end
 
   local chat_log = checkpoint.channel_values and checkpoint.channel_values.ui_chat_log or {}
+
+  -- Extract workflow status - handle multiple possible field names
+  -- Check result first, then checkpoint.channel_values, then checkpoint.metadata
+  local workflow_status = result.workflowStatus
+    or result.workflow_status
+    or result.status
+    or (checkpoint.channel_values and checkpoint.channel_values.status)
+    or (checkpoint.metadata and checkpoint.metadata.status)
+    or (checkpoint.metadata and checkpoint.metadata.workflowStatus)
+    or "RUNNING"
+
   Utils.debug(
     "handle_workflow_message: status="
-      .. tostring(result.workflowStatus)
+      .. tostring(workflow_status)
       .. ", chat_log size="
       .. #chat_log
       .. ", errors="
       .. vim.inspect(result.errors or {})
   )
 
+  -- Log all possible status fields for debugging
+  Utils.debug("Status field candidates: workflowStatus=" .. tostring(result.workflowStatus)
+    .. ", workflow_status=" .. tostring(result.workflow_status)
+    .. ", status=" .. tostring(result.status)
+    .. ", checkpoint.channel_values.status=" .. tostring(checkpoint.channel_values and checkpoint.channel_values.status)
+    .. ", checkpoint.metadata.status=" .. tostring(checkpoint.metadata and checkpoint.metadata.status))
+
   -- Store workflow state
   M.active_workflows[workflow_id] = {
-    status = result.workflowStatus,
-    goal = result.workflowGoal,
+    status = workflow_status,
+    goal = result.workflowGoal or result.workflow_goal or result.goal,
     errors = result.errors or {},
     checkpoint = checkpoint,
     chat_log = chat_log,
@@ -1045,15 +1063,29 @@ function M._register_handlers(client)
 
       -- Extract workflow ID from the result or context
       -- The workflow ID might be in different places depending on how it's sent
-      local workflow_id = result.workflowId or result.workflow_id
+      local workflow_id = result.workflowId or result.workflow_id or result.id
+
       if not workflow_id then
-        Utils.debug("No workflow ID in result, trying to match by goal")
-        -- Try to find it from our active workflows
-        for id, workflow in pairs(M.active_workflows) do
-          if workflow.goal == result.workflowGoal then
-            workflow_id = id
-            Utils.debug("Matched workflow by goal: " .. id)
-            break
+        Utils.debug("No workflow ID in result, trying to match by goal or using first active workflow")
+
+        -- Try to find it from our active workflows by goal
+        local goal = result.workflowGoal or result.workflow_goal or result.goal
+        if goal then
+          for id, workflow in pairs(M.active_workflows) do
+            if workflow.goal == goal then
+              workflow_id = id
+              Utils.debug("Matched workflow by goal: " .. id)
+              break
+            end
+          end
+        end
+
+        -- If still not found and we have only one active workflow, use it
+        if not workflow_id then
+          local active_ids = vim.tbl_keys(M.active_workflows)
+          if #active_ids == 1 then
+            workflow_id = active_ids[1]
+            Utils.debug("Using single active workflow: " .. workflow_id)
           end
         end
       else
@@ -1062,8 +1094,18 @@ function M._register_handlers(client)
 
       if workflow_id then
         M.handle_workflow_message(workflow_id, result)
+
+        -- Trigger a notification that workflow state has changed
+        -- This helps ensure parse_response picks up the changes
+        vim.schedule(function()
+          vim.api.nvim_exec_autocmds("User", {
+            pattern = "AvanteGitLabDuoWorkflowUpdate",
+            data = { workflow_id = workflow_id }
+          })
+        end)
       else
         Utils.debug("Could not determine workflow ID for message")
+        Utils.debug("Active workflows: " .. vim.inspect(vim.tbl_keys(M.active_workflows)))
       end
     end
     Utils.debug("Registered handler for $/gitlab/workflowMessage")
