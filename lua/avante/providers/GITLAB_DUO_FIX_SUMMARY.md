@@ -16,19 +16,11 @@ According to the `prompt.md` specification, the `$/gitlab/startWorkflow` notific
 {
   goal: string;
   metadata: {
-    projectId?: string;              // GitLab project ID
-    namespaceId?: string;            // GitLab namespace ID
+    projectId?: string;              // GitLab project ID (numeric)
+    namespaceId?: string;            // GitLab namespace ID (numeric)
     selectedModelIdentifier?: string; // AI model to use
   };
   additionalContext?: AIContextItem[];
-}
-```
-
-The document showed example code with placeholder functions:
-```lua
-metadata = {
-  projectId = get_current_project_id(),
-  namespaceId = get_current_namespace_id(),
 }
 ```
 
@@ -37,188 +29,159 @@ metadata = {
 The original implementation:
 1. Set `project_id` and `namespace_id` to `nil` in the default config
 2. Directly passed these `nil` values to the LSP without any auto-detection
-3. Did not implement the `get_current_project_id()` and `get_current_namespace_id()` functions
-
-```lua
--- Original code
-local workflow_params = {
-  goal = goal,
-  metadata = {
-    projectId = provider_conf.project_id,  -- nil
-    namespaceId = provider_conf.namespace_id, -- nil
-    selectedModelIdentifier = provider_conf.model,
-  },
-  additionalContext = context,
-}
-```
+3. Did not query the GitLab API to get the numeric IDs
 
 ### Why It Worked in VS Code
 
-The VS Code extension (gitlab-vscode-extension) automatically:
+The VS Code extension automatically:
 1. Detects the git remote URL
 2. Parses the namespace/project path
-3. Queries the GitLab API to get project details
-4. Populates the project_id and namespace_id fields
+3. Queries the GitLab API to get project details (including numeric IDs)
+4. Populates the project_id and namespace_id fields with numeric values
 
 ## Solution Implemented
 
-### 1. Added Git Remote Detection
+### 1. Git Remote Detection
 
-Added three new functions to automatically detect the GitLab project:
+Added function to detect the git remote URL from the current buffer's directory:
 
 ```lua
----Get git remote URL for the current buffer's directory
----@return string|nil
 function M.get_git_remote_url()
   local filepath = vim.api.nvim_buf_get_name(0)
-  if filepath == "" then return nil end
-
   local dir = vim.fn.fnamemodify(filepath, ":h")
-  local handle = io.popen("cd " .. vim.fn.shellescape(dir) .. " && git remote get-url origin 2>/dev/null")
-  if not handle then return nil end
-
-  local result = handle:read("*a")
-  handle:close()
-
-  if result and result ~= "" then return vim.trim(result) end
-  return nil
+  local cmd = string.format("git -C %s remote get-url origin 2>/dev/null", vim.fn.shellescape(dir))
+  local result = vim.fn.system(cmd)
+  -- Returns the remote URL or nil
 end
 ```
 
-### 2. Added URL Parsing
+### 2. URL Parsing
 
-Parses both HTTPS and SSH GitLab URLs:
+Parses both HTTPS and SSH GitLab URLs to extract namespace/project:
 
 ```lua
----Parse GitLab namespace and project from git remote URL
----@param remote_url string
----@return string|nil namespace
----@return string|nil project
 function M.parse_gitlab_remote(remote_url)
-  if not remote_url then return nil, nil end
-
-  -- Handle HTTPS URLs: https://gitlab.com/namespace/project.git
-  -- Handle SSH URLs: git@gitlab.com:namespace/project.git
-
-  -- Returns namespace and project separately
+  -- Handles: https://gitlab.com/namespace/project.git
+  -- Handles: git@gitlab.com:namespace/project.git
+  -- Returns: namespace, project
 end
 ```
 
-### 3. Added Project Path Detection
+### 3. GitLab API Query
 
-Combines namespace and project into a path format:
+Queries the GitLab API to get numeric project and namespace IDs:
 
 ```lua
----Get GitLab project path (namespace/project) from current git repository
----@return string|nil
-function M.get_current_project_path()
-  local remote_url = M.get_git_remote_url()
-  if not remote_url then
-    Utils.debug("No git remote URL found")
-    return nil
-  end
+function M.query_gitlab_project(project_path)
+  local token, base_url = M.get_gitlab_credentials()
+  local encoded_path = project_path:gsub("/", "%%2F")
+  local api_url = base_url .. "/api/v4/projects/" .. encoded_path
 
-  local namespace, project = M.parse_gitlab_remote(remote_url)
-  if namespace and project then
-    local project_path = namespace .. "/" .. project
-    Utils.debug("Detected GitLab project path: " .. project_path)
-    return project_path
-  end
-
-  return nil
+  -- Queries API using curl with LSP client's token
+  -- Returns project data with numeric id and namespace.id
 end
 ```
 
-### 4. Updated Workflow Initialization
+### 4. Credentials from LSP Client
 
-Modified the workflow parameter building to use auto-detected values:
+Retrieves GitLab token and base URL from the LSP client settings:
 
 ```lua
--- Get project path from git repository or config
-local project_path = M.get_current_project_path()
+function M.get_gitlab_credentials()
+  local client = M.get_gitlab_client()
+  local settings = client.config.settings
+  local token = settings.gitlab.token
+  local base_url = settings.gitlab.baseUrl or "https://gitlab.com"
+  return token, base_url
+end
+```
+
+### 5. Updated Workflow Initialization
+
+Modified the workflow parameter building to use API-queried numeric IDs:
+
+```lua
+-- Get project IDs - prioritize config values, then auto-detect from git
 local project_id = provider_conf.project_id
 local namespace_id = provider_conf.namespace_id
 
--- If we have a project path and no explicit IDs, use the path format
--- GitLab API accepts both numeric IDs and "namespace/project" format
-if project_path and not project_id then
-  -- Use the full path as project identifier (GitLab accepts this format)
-  project_id = project_path
-  Utils.debug("Using auto-detected project path: " .. project_path)
+-- If no explicit config values, try to auto-detect from git and query GitLab API
+if not project_id or not namespace_id then
+  Utils.debug("Attempting to auto-detect project from git repository...")
+  local detected_project_id, detected_namespace_id = M.get_project_ids()
+
+  if not project_id and detected_project_id then
+    project_id = detected_project_id  -- Numeric ID from API
+  end
+
+  if not namespace_id and detected_namespace_id then
+    namespace_id = detected_namespace_id  -- Numeric ID from API
+  end
 end
 
--- Build metadata - only include fields that have values
+-- Build metadata with numeric IDs
 local metadata = {
   selectedModelIdentifier = provider_conf.model,
 }
 
 if project_id then
   metadata.projectId = project_id
-  Utils.debug("Using projectId: " .. tostring(project_id))
-else
-  Utils.warn(
-    "No GitLab project detected. Workflow may fail. Please set project_id in config or ensure you're in a GitLab repository.",
-    { once = true, title = "Avante" }
-  )
 end
 
 if namespace_id then
   metadata.namespaceId = namespace_id
-  Utils.debug("Using namespaceId: " .. tostring(namespace_id))
 end
-
--- Start the workflow via LSP request
-local workflow_params = {
-  goal = goal,
-  metadata = metadata,
-  additionalContext = context,
-}
 ```
 
 ## Key Features of the Fix
 
 ### 1. Automatic Project Detection
 - Detects project from git remote URL automatically
+- Queries GitLab API to get numeric IDs
 - No manual configuration required for most use cases
 - Works with both HTTPS and SSH URLs
 
-### 2. Multiple ID Format Support
-The provider now supports three ways to specify the project:
-- **Auto-detected path**: `"namespace/project"` from git remote
-- **Manual path**: Set `project_id = "gitlab-org/gitlab"` in config
-- **Numeric ID**: Set `project_id = "278964"` in config
+### 2. GitLab API Integration
+- Uses token from LSP client settings
+- Queries `/api/v4/projects/:id` endpoint
+- Extracts numeric `id` and `namespace.id`
+- Works with gitlab.com and self-hosted instances
 
-### 3. Graceful Fallback
+### 3. Proper ID Format
+The provider now uses **numeric IDs** (not path format) as required by the GitLab Duo API:
+- ✅ `projectId: "278964"` (numeric)
+- ❌ ~~`projectId: "gitlab-org/gitlab"`~~ (path - not supported)
+
+### 4. Graceful Fallback
 - Uses config values if provided (takes precedence)
 - Falls back to auto-detection if config is nil
 - Shows warning if no project can be determined
-- Only includes metadata fields that have values (avoids sending `null`)
+- Only includes metadata fields that have values
 
-### 4. Better Debugging
-- Added debug logging for each step of detection
+### 5. Better Debugging
+- Added debug logging for each step
 - Shows detected remote URL
 - Shows parsed project path
+- Shows API query URL
+- Shows numeric IDs retrieved
 - Shows final metadata being sent
-- Helps troubleshoot configuration issues
 
 ## Updated Documentation
 
 ### README Updates
 
-Added comprehensive troubleshooting section for the "Duo Agent Platform feature is not enabled" error:
-
-1. How to check git remote URL
-2. How to manually specify project_id
-3. How to enable debug mode to see what's being sent
-4. Clarified that auto-detection works from git remote
+- Clarified that numeric IDs are required
+- Documented the auto-detection process (git → API → numeric IDs)
+- Added troubleshooting for git detection issues
+- Explained how to enable debug mode
 
 ### Configuration Documentation
 
-Updated the `project_id` and `namespace_id` documentation to explain:
-- Auto-detection feature
-- Supported formats (numeric ID vs path)
-- When manual configuration is needed
-- How auto-detection works
+Updated to explain:
+- Auto-detection requires LSP client with valid token
+- Numeric IDs are queried from GitLab API
+- Manual configuration still supported
+- How the detection process works
 
 ## Testing Recommendations
 
@@ -231,27 +194,25 @@ To test the fix:
      provider = "gitlab_duo",
    })
    ```
-   Check `:messages` for debug output showing detected project
+   Check `:messages` for:
+   - "get_git_remote_url: Found remote URL: ..."
+   - "Detected GitLab project path: ..."
+   - "Querying GitLab API: ..."
+   - "Successfully retrieved project info from GitLab API"
+   - "Project ID: ..."
+   - "Namespace ID: ..."
 
 2. **Test manual configuration**:
    ```lua
    providers = {
      gitlab_duo = {
-       project_id = "your-namespace/your-project",
+       project_id = "278964",  -- numeric ID
+       namespace_id = "9970",  -- numeric ID
      },
    }
    ```
 
-3. **Test with numeric ID**:
-   ```lua
-   providers = {
-     gitlab_duo = {
-       project_id = "12345",
-     },
-   }
-   ```
-
-4. **Test outside GitLab repository**:
+3. **Test outside GitLab repository**:
    Should show warning about no project detected
 
 ## Comparison with VS Code Extension
@@ -259,21 +220,23 @@ To test the fix:
 | Feature | VS Code Extension | Avante Provider (Fixed) |
 |---------|------------------|------------------------|
 | Auto-detect from git | ✅ Yes | ✅ Yes |
+| Query GitLab API | ✅ Yes | ✅ Yes |
+| Use numeric IDs | ✅ Yes | ✅ Yes |
 | Parse HTTPS URLs | ✅ Yes | ✅ Yes |
 | Parse SSH URLs | ✅ Yes | ✅ Yes |
-| Support path format | ✅ Yes | ✅ Yes |
-| Support numeric IDs | ✅ Yes | ✅ Yes |
 | Manual override | ✅ Yes | ✅ Yes |
 | Debug logging | ✅ Yes | ✅ Yes |
+| Get token from LSP | ✅ Yes | ✅ Yes |
 
 ## Conclusion
 
-The fix ensures that the Avante provider behaves identically to the VS Code extension in terms of project detection and identification. The key improvement is automatic detection of the GitLab project from the git remote URL, which eliminates the need for manual configuration in most cases.
+The fix ensures that the Avante provider behaves identically to the VS Code extension by:
 
-The provider now properly implements the requirements from `prompt.md` by:
-1. ✅ Detecting the current project context
-2. ✅ Sending valid project metadata to the LSP
-3. ✅ Supporting multiple project identifier formats
-4. ✅ Providing clear error messages when configuration is missing
-5. ✅ Following the same patterns as the VS Code extension
+1. ✅ Detecting the git remote URL
+2. ✅ Parsing the namespace/project path
+3. ✅ Querying the GitLab API with the LSP client's token
+4. ✅ Extracting numeric project_id and namespace_id
+5. ✅ Sending these numeric IDs in the workflow metadata
+
+The provider now properly implements the requirements from `prompt.md` and should work identically to VS Code when used in a GitLab repository with a configured LSP client.
 

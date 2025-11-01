@@ -32,16 +32,26 @@ end
 ---@return string|nil
 function M.get_git_remote_url()
   local filepath = vim.api.nvim_buf_get_name(0)
-  if filepath == "" then return nil end
+  if filepath == "" then
+    Utils.debug("get_git_remote_url: No filepath for current buffer")
+    return nil
+  end
 
   local dir = vim.fn.fnamemodify(filepath, ":h")
-  local handle = io.popen("cd " .. vim.fn.shellescape(dir) .. " && git remote get-url origin 2>/dev/null")
-  if not handle then return nil end
+  Utils.debug("get_git_remote_url: Checking directory: " .. dir)
 
-  local result = handle:read("*a")
-  handle:close()
+  -- Use vim.fn.system instead of io.popen for better compatibility
+  local cmd = string.format("git -C %s remote get-url origin 2>/dev/null", vim.fn.shellescape(dir))
+  local result = vim.fn.system(cmd)
+  local exit_code = vim.v.shell_error
 
-  if result and result ~= "" then return vim.trim(result) end
+  if exit_code == 0 and result and result ~= "" then
+    local url = vim.trim(result)
+    Utils.debug("get_git_remote_url: Found remote URL: " .. url)
+    return url
+  end
+
+  Utils.debug("get_git_remote_url: No remote URL found (exit code: " .. exit_code .. ")")
   return nil
 end
 
@@ -99,6 +109,106 @@ function M.get_current_project_path()
 
   Utils.debug("Could not parse GitLab project from remote URL")
   return nil
+end
+
+---Get GitLab token and base URL from LSP client settings
+---@return string|nil, string|nil
+function M.get_gitlab_credentials()
+  local client = M.get_gitlab_client()
+  if not client then
+    Utils.debug("No GitLab LSP client found")
+    return nil, nil
+  end
+
+  local settings = client.config.settings
+  if not settings or not settings.gitlab then
+    Utils.debug("No GitLab settings found in LSP client")
+    return nil, nil
+  end
+
+  local token = settings.gitlab.token
+  local base_url = settings.gitlab.baseUrl or "https://gitlab.com"
+
+  Utils.debug("GitLab base URL: " .. base_url)
+
+  return token, base_url
+end
+
+---Query GitLab API to get project information
+---@param project_path string The namespace/project path
+---@return table|nil Project information with id and namespace
+function M.query_gitlab_project(project_path)
+  local token, base_url = M.get_gitlab_credentials()
+
+  if not token then
+    Utils.debug("No GitLab token available, cannot query API")
+    return nil
+  end
+
+  if not project_path then
+    Utils.debug("No project path provided")
+    return nil
+  end
+
+  -- URL-encode the project path
+  local encoded_path = project_path:gsub("/", "%%2F")
+  local api_url = base_url .. "/api/v4/projects/" .. encoded_path
+
+  Utils.debug("Querying GitLab API: " .. api_url)
+
+  -- Use curl to query the API
+  local curl_cmd = string.format(
+    "curl -s -H 'PRIVATE-TOKEN: %s' '%s'",
+    token,
+    api_url
+  )
+
+  local result = vim.fn.system(curl_cmd)
+  local exit_code = vim.v.shell_error
+
+  if exit_code ~= 0 then
+    Utils.debug("GitLab API query failed with exit code: " .. exit_code)
+    return nil
+  end
+
+  -- Parse JSON response
+  local ok, project_data = pcall(vim.fn.json_decode, result)
+  if not ok or not project_data then
+    Utils.debug("Failed to parse GitLab API response")
+    return nil
+  end
+
+  if project_data.message then
+    Utils.debug("GitLab API error: " .. project_data.message)
+    return nil
+  end
+
+  Utils.debug("Successfully retrieved project info from GitLab API")
+  Utils.debug("Project ID: " .. tostring(project_data.id))
+  Utils.debug("Namespace ID: " .. tostring(project_data.namespace and project_data.namespace.id))
+
+  return project_data
+end
+
+---Get GitLab project ID and namespace ID from current repository
+---@return string|nil, string|nil
+function M.get_project_ids()
+  local project_path = M.get_current_project_path()
+  if not project_path then
+    Utils.debug("Could not determine project path from git remote")
+    return nil, nil
+  end
+
+  local project_data = M.query_gitlab_project(project_path)
+  if not project_data then
+    Utils.debug("Could not query GitLab API for project information")
+    return nil, nil
+  end
+
+  local project_id = tostring(project_data.id)
+  local namespace_id = project_data.namespace and tostring(project_data.namespace.id)
+
+  return project_id, namespace_id
 end
 
 ---@param workflow_id string
@@ -252,17 +362,25 @@ function M:parse_curl_args(prompt_opts)
     })
   end
 
-  -- Get project path from git repository or config
-  local project_path = M.get_current_project_path()
+  -- Get project IDs - prioritize config values, then auto-detect from git
   local project_id = provider_conf.project_id
   local namespace_id = provider_conf.namespace_id
 
-  -- If we have a project path and no explicit IDs, use the path format
-  -- GitLab API accepts both numeric IDs and "namespace/project" format
-  if project_path and not project_id then
-    -- Use the full path as project identifier (GitLab accepts this format)
-    project_id = project_path
-    Utils.debug("Using auto-detected project path: " .. project_path)
+  -- If no explicit config values, try to auto-detect from git and query GitLab API
+  if not project_id or not namespace_id then
+    Utils.debug("Attempting to auto-detect project from git repository...")
+    local detected_project_id, detected_namespace_id = M.get_project_ids()
+
+    -- Use detected values if config doesn't provide them
+    if not project_id and detected_project_id then
+      project_id = detected_project_id
+      Utils.debug("Using auto-detected project_id: " .. project_id)
+    end
+
+    if not namespace_id and detected_namespace_id then
+      namespace_id = detected_namespace_id
+      Utils.debug("Using auto-detected namespace_id: " .. namespace_id)
+    end
   end
 
   -- Build metadata - only include fields that have values

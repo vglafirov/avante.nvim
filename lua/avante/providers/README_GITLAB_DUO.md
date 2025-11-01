@@ -55,19 +55,34 @@ Supported models depend on your GitLab instance configuration.
 
 ### `project_id` (string, optional)
 
-The GitLab project ID to associate with the workflow. This provides project-specific context to the AI agent.
+The GitLab project ID (numeric) to associate with the workflow. This provides project-specific context to the AI agent.
 
-**Auto-detection**: If not specified, the provider will automatically detect the project from your git remote URL. The provider supports both:
-- Numeric project IDs (e.g., `"12345"`)
-- Project paths (e.g., `"gitlab-org/gitlab"`)
+**Auto-detection**: If not specified, the provider will automatically:
+1. Parse the git remote URL from your current repository
+2. Extract the namespace/project path (e.g., `"gitlab-org/gitlab"`)
+3. Query the GitLab API to get the numeric project ID
+4. Use that ID in the workflow metadata
 
-**Note**: Auto-detection works by parsing the git remote URL of the current buffer's repository. If you're not in a GitLab repository or want to use a specific project, set this explicitly.
+**Manual configuration**: You can explicitly set the numeric project ID:
+```lua
+providers = {
+  gitlab_duo = {
+    project_id = "278964", -- numeric ID
+  },
+}
+```
+
+**Note**: Auto-detection requires:
+- You're in a GitLab repository with a remote URL
+- The gitlab-lsp client has a valid token and base URL configured
 
 ### `namespace_id` (string, optional)
 
-The GitLab namespace ID to use for the workflow. This can be a group or user namespace.
+The GitLab namespace ID (numeric) to use for the workflow. This can be a group or user namespace.
 
-**Note**: This is typically only needed if you want to override the namespace detected from the project path.
+**Auto-detection**: Like `project_id`, this is automatically detected from the GitLab API response when querying the project information.
+
+**Note**: This is typically only needed if you want to override the namespace detected from the API.
 
 ### `timeout` (number)
 
