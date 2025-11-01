@@ -106,23 +106,25 @@ function M.get_current_project_path()
   return nil
 end
 
----Get GitLab token and base URL from LSP client settings
+---Get GitLab token and base URL
 ---@return string|nil, string|nil
 function M.get_gitlab_credentials()
+  -- Get token from environment variable
+  local token = vim.env.GITLAB_TOKEN
+
+  if not token then
+    Utils.debug("No GITLAB_TOKEN environment variable found")
+    return nil, nil
+  end
+
+  Utils.debug("Found GITLAB_TOKEN environment variable")
+
+  -- Get base URL from LSP client settings if available, otherwise use default
+  local base_url = "https://gitlab.com"
   local client = M.get_gitlab_client()
-  if not client then
-    Utils.debug("No GitLab LSP client found")
-    return nil, nil
+  if client and client.config.settings and client.config.settings.gitlab then
+    base_url = client.config.settings.gitlab.baseUrl or base_url
   end
-
-  local settings = client.config.settings
-  if not settings or not settings.gitlab then
-    Utils.debug("No GitLab settings found in LSP client")
-    return nil, nil
-  end
-
-  local token = settings.gitlab.token
-  local base_url = settings.gitlab.baseUrl or "https://gitlab.com"
 
   Utils.debug("GitLab base URL: " .. base_url)
 
