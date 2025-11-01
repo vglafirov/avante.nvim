@@ -424,6 +424,16 @@ M._defaults = {
     },
 
     ---@type AvanteSupportedProvider
+    gitlab_duo = {
+      endpoint = "", -- Not used for LSP-based provider
+      model = "claude-3-5-sonnet", -- Default model
+      timeout = 60000, -- Timeout in milliseconds (workflows can take longer)
+      project_id = nil, -- GitLab project ID (optional)
+      namespace_id = nil, -- GitLab namespace ID (optional)
+      extra_request_body = {},
+    },
+
+    ---@type AvanteSupportedProvider
     vertex_claude = {
       endpoint = "https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/publishers/antrhopic/models",
       model = "claude-3-5-sonnet-v2@20241022",

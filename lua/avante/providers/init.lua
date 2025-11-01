@@ -14,6 +14,7 @@ local Utils = require("avante.utils")
 ---@field ollama AvanteProviderFunctor
 ---@field vertex_claude AvanteProviderFunctor
 ---@field watsonx_code_assistant AvanteProviderFunctor
+---@field gitlab_duo AvanteProviderFunctor
 local M = {}
 
 ---@class EnvironmentHandler
