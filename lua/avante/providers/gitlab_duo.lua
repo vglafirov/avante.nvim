@@ -28,20 +28,15 @@ function M.get_gitlab_client()
   return nil
 end
 
----Get git remote URL for the current buffer's directory
+---Get git remote URL from the current working directory
 ---@return string|nil
 function M.get_git_remote_url()
-  local filepath = vim.api.nvim_buf_get_name(0)
-  if filepath == "" then
-    Utils.debug("get_git_remote_url: No filepath for current buffer")
-    return nil
-  end
-
-  local dir = vim.fn.fnamemodify(filepath, ":h")
-  Utils.debug("get_git_remote_url: Checking directory: " .. dir)
+  -- Use current working directory instead of buffer's directory
+  local cwd = vim.fn.getcwd()
+  Utils.debug("get_git_remote_url: Checking directory: " .. cwd)
 
   -- Use vim.fn.system instead of io.popen for better compatibility
-  local cmd = string.format("git -C %s remote get-url origin 2>/dev/null", vim.fn.shellescape(dir))
+  local cmd = string.format("git -C %s remote get-url origin 2>/dev/null", vim.fn.shellescape(cwd))
   local result = vim.fn.system(cmd)
   local exit_code = vim.v.shell_error
 
