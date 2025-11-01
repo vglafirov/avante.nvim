@@ -477,7 +477,7 @@ function M:parse_curl_args(prompt_opts)
     return nil
   end
 
-  -- Build additional context from current buffer
+  -- Build additional context from current buffer and selected files
   local context = {}
   local bufnr = vim.api.nvim_get_current_buf()
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
@@ -495,6 +495,48 @@ function M:parse_curl_args(prompt_opts)
         file_path = filepath,
       },
     })
+  end
+
+  -- Extract selected files from context messages
+  -- Selected files are rendered in messages with is_context = true
+  for _, message in ipairs(prompt_opts.messages) do
+    if message.is_context and message.content then
+      -- Parse selected files from the rendered context
+      -- Format: <file path="..." language="...">content</file>
+      local content_str = message.content
+
+      -- Use pattern matching to find all file blocks
+      -- Match pattern: <file path="..." language="...">...</file>
+      local start_pos = 1
+      while true do
+        local file_start, file_end = content_str:find('<file path="[^"]*" language="[^"]*">.-</file>', start_pos)
+        if not file_start then break end
+
+        local file_block = content_str:sub(file_start, file_end)
+
+        -- Extract path, language, and content from the file block
+        local file_path = file_block:match('<file path="([^"]+)"')
+        local file_content = file_block:match('>(.+)</file>$')
+
+        if file_path and file_content then
+          local file_name = vim.fn.fnamemodify(file_path, ":t")
+          -- Only add if it's not the same as the current buffer
+          if file_path ~= filepath then
+            table.insert(context, {
+              category = "file",
+              content = file_content,
+              metadata = {
+                file_name = file_name,
+                file_path = file_path,
+              },
+            })
+            Utils.debug("Added selected file to context: " .. file_path)
+          end
+        end
+
+        start_pos = file_end + 1
+      end
+    end
   end
 
   -- Enhance the goal with file context if available
