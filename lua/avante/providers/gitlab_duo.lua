@@ -20,7 +20,7 @@ M.active_workflows = {}
 ---@return table|nil
 function M.get_gitlab_client()
   for _, client in ipairs(vim.lsp.get_active_clients()) do
-    if client.name == "gitlab-lsp" then return client end
+    if client.name == "gitlab_lsp" then return client end
   end
   return nil
 end
@@ -98,7 +98,7 @@ end
 function M:parse_curl_args(prompt_opts)
   local client = self.get_gitlab_client()
   if not client then
-    Utils.error("GitLab LSP client not found. Please ensure gitlab-lsp is running.", {
+    Utils.error("GitLab LSP client not found. Please ensure gitlab_lsp is running.", {
       once = true,
       title = "Avante",
     })
@@ -223,11 +223,7 @@ function M:parse_response(ctx, data_stream, event_state, opts)
     elseif msg.message_type == "request" then
       -- Tool approval request
       if msg.tool_info then
-        local approval_msg = string.format(
-          "\n[Approval Required for: %s]\n%s\n",
-          msg.tool_info.name,
-          msg.content
-        )
+        local approval_msg = string.format("\n[Approval Required for: %s]\n%s\n", msg.tool_info.name, msg.content)
         if opts.on_chunk then opts.on_chunk(approval_msg) end
       end
     end
@@ -317,7 +313,7 @@ function M.setup()
       vim.api.nvim_create_autocmd("LspAttach", {
         callback = function(args)
           local attached_client = vim.lsp.get_client_by_id(args.data.client_id)
-          if attached_client and attached_client.name == "gitlab-lsp" then
+          if attached_client and attached_client.name == "gitlab_lsp" then
             M._register_handlers(attached_client)
             return true -- Remove the autocmd after successful registration
           end
@@ -364,9 +360,7 @@ function M._register_handlers(client)
   -- Register handler for command execution requests
   if not client.handlers["$/gitlab/runCommand"] then
     client.handlers["$/gitlab/runCommand"] = function(err, params, ctx)
-      if err then
-        return { exitCode = 1, output = "Error: " .. vim.inspect(err) }
-      end
+      if err then return { exitCode = 1, output = "Error: " .. vim.inspect(err) } end
 
       local command = params.command
       local args = params.args or {}
@@ -399,4 +393,3 @@ function M._register_handlers(client)
 end
 
 return M
-
