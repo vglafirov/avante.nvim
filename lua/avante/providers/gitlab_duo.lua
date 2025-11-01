@@ -20,7 +20,7 @@ M.active_workflows = {}
 ---@return table|nil
 function M.get_gitlab_client()
   for _, client in ipairs(vim.lsp.get_active_clients()) do
-    if client.name == "gitlab_lsp" then return client end
+    if client.name == "gitlab_code_suggestions" then return client end
   end
   return nil
 end
@@ -98,7 +98,7 @@ end
 function M:parse_curl_args(prompt_opts)
   local client = self.get_gitlab_client()
   if not client then
-    Utils.error("GitLab LSP client not found. Please ensure gitlab_lsp is running.", {
+    Utils.error("GitLab LSP client not found. Please ensure gitlab_code_suggestions is running.", {
       once = true,
       title = "Avante",
     })
@@ -313,7 +313,7 @@ function M.setup()
       vim.api.nvim_create_autocmd("LspAttach", {
         callback = function(args)
           local attached_client = vim.lsp.get_client_by_id(args.data.client_id)
-          if attached_client and attached_client.name == "gitlab_lsp" then
+          if attached_client and attached_client.name == "gitlab_code_suggestions" then
             M._register_handlers(attached_client)
             return true -- Remove the autocmd after successful registration
           end
