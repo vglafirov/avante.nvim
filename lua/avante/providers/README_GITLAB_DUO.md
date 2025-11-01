@@ -7,7 +7,7 @@ This provider integrates GitLab Duo's Agentic Platform with Avante.nvim through 
 1. **GitLab Language Server (gitlab-lsp)**: Must be installed and configured in your Neovim setup
 2. **GitLab Account**: With access to GitLab Duo features
 3. **GitLab Token**: Configured as `GITLAB_TOKEN` environment variable
-4. **Docker**: Required for workflow execution (see [Docker Setup](#docker-setup))
+4. **Docker** (Optional): Can be enabled for advanced workflow execution (see [Docker Setup](#docker-setup))
 
 ## Installation
 
@@ -41,6 +41,7 @@ require('avante').setup({
       model = "claude-3-5-sonnet", -- or another supported model
       project_id = "your-project-id", -- optional
       namespace_id = "your-namespace-id", -- optional
+      use_docker = false, -- optional, default is false. Set to true to enable Docker support
     },
   },
 })
@@ -84,6 +85,29 @@ The GitLab namespace ID (numeric) to use for the workflow. This can be a group o
 **Auto-detection**: Like `project_id`, this is automatically detected from the GitLab API response when querying the project information.
 
 **Note**: This is typically only needed if you want to override the namespace detected from the API.
+
+### `use_docker` (boolean, optional)
+
+Enable Docker support for advanced workflow execution. Default: `false`
+
+When enabled, the provider will:
+- Auto-detect Docker socket path on your system
+- Configure GitLab LSP to use Docker for workflow execution
+- Enable advanced workflow features that require Docker
+
+**Note**: Docker is disabled by default. Most basic workflows work without Docker. Enable it only if you need advanced features like:
+- Complex multi-step workflows
+- Tool execution in isolated environments
+- Code generation and testing
+
+To enable Docker:
+```lua
+providers = {
+  gitlab_duo = {
+    use_docker = true,
+  },
+}
+```
 
 ### `timeout` (number)
 
@@ -129,9 +153,11 @@ The agent can execute commands in your terminal through the LSP protocol. Comman
 
 Responses from the GitLab Duo agent are streamed in real-time, providing immediate feedback as the agent works.
 
-## Docker Setup
+## Docker Setup (Optional)
 
-GitLab Duo Workflow requires Docker to execute workflows. The provider automatically detects Docker socket paths on macOS and Linux.
+Docker support is **optional** and **disabled by default**. The provider works without Docker for most basic workflows.
+
+To enable Docker support, set `use_docker = true` in your provider configuration. When enabled, the provider automatically detects Docker socket paths on macOS and Linux.
 
 ### Automatic Detection
 
@@ -206,28 +232,38 @@ Docker socket not found. Workflow may have limited functionality.
 
 ## Troubleshooting
 
-### \"Docker socket not configured\"
+### "Docker socket not configured"
 
-This error means the provider couldn't find Docker. To fix:
+This warning appears when `use_docker = true` but the provider couldn't find Docker. To fix:
 
-1. **Install Docker** (see [Docker Setup](#docker-setup))
-2. **Start Docker:**
-   ```bash
-   # Colima
-   colima start
+1. **Disable Docker** (recommended if you don't need it):
+   ```lua
+   providers = {
+     gitlab_duo = {
+       use_docker = false, -- or simply omit this line
+     },
+   }
+   ```
 
-   # Standard Docker
-   sudo systemctl start docker
-   ```
-3. **Verify Docker is running:**
-   ```bash
-   docker ps
-   ```
-4. **Set Docker socket path manually** if auto-detection fails:
-   ```bash
-   export GITLAB_DOCKER_SOCKET="/path/to/docker.sock"
-   ```
-5. **Restart Neovim** to pick up the environment variable
+2. **Or install and configure Docker** (if you need Docker features):
+   - **Install Docker** (see [Docker Setup](#docker-setup))
+   - **Start Docker:**
+     ```bash
+     # Colima
+     colima start
+
+     # Standard Docker
+     sudo systemctl start docker
+     ```
+   - **Verify Docker is running:**
+     ```bash
+     docker ps
+     ```
+   - **Set Docker socket path manually** if auto-detection fails:
+     ```bash
+     export GITLAB_DOCKER_SOCKET="/path/to/docker.sock"
+     ```
+   - **Restart Neovim** to pick up the environment variable
 
 ### "GitLab LSP client not found"
 

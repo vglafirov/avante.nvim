@@ -365,7 +365,8 @@ end
 ---Sync configuration with GitLab LSP
 ---@param client table LSP client
 ---@param project_path string|nil Project path (namespace/project)
-function M.sync_lsp_config(client, project_path)
+---@param use_docker boolean|nil Whether to enable Docker support (defaults to false)
+function M.sync_lsp_config(client, project_path, use_docker)
   local token, base_url = M.get_gitlab_credentials()
 
   if not token then
@@ -373,15 +374,26 @@ function M.sync_lsp_config(client, project_path)
     return
   end
 
-  -- Get Docker socket path
-  local docker_socket = M.get_docker_socket_path()
-  local use_docker = docker_socket ~= nil
+  -- Default to disabled if not explicitly set
+  if use_docker == nil then
+    use_docker = false
+  end
 
-  if not use_docker then
-    Utils.warn(
-      "Docker socket not found. Workflow may have limited functionality. Set GITLAB_DOCKER_SOCKET env var to specify Docker socket path.",
-      { once = true, title = "Avante" }
-    )
+  -- Only attempt to get Docker socket if Docker is enabled
+  local docker_socket = ""
+  if use_docker then
+    docker_socket = M.get_docker_socket_path() or ""
+    if docker_socket == "" then
+      Utils.warn(
+        "Docker is enabled but socket not found. Set GITLAB_DOCKER_SOCKET env var to specify Docker socket path, or disable Docker in provider config.",
+        { once = true, title = "Avante" }
+      )
+      use_docker = false
+    else
+      Utils.debug("Docker enabled with socket: " .. docker_socket)
+    end
+  else
+    Utils.debug("Docker support is disabled (use_docker = false)")
   end
 
   -- Build ClientConfig payload similar to VS Code extension
@@ -540,7 +552,9 @@ function M:parse_curl_args(prompt_opts)
   local project_path = M.get_current_project_path()
   if project_path then
     Utils.debug("Syncing LSP configuration with project path: " .. project_path)
-    M.sync_lsp_config(client, project_path)
+    -- Pass use_docker config from provider configuration (defaults to false)
+    local use_docker = provider_conf.use_docker or false
+    M.sync_lsp_config(client, project_path, use_docker)
     -- Give LSP a moment to process the configuration
     vim.wait(100)
   end
