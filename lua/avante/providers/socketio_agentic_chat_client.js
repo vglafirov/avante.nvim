@@ -54,25 +54,27 @@ debug(`CSRF Token: ${csrfToken}`);
 const serverRoot = baseUrl.match(/^(https?:\/\/[^\/]+)/)[1];
 debug(`Server root: ${serverRoot}`);
 
-// Extract the webview path (e.g., /webview/agentic-duo-chat)
-const webviewPath = baseUrl.replace(serverRoot, '');
-debug(`Webview path: ${webviewPath}`);
-
-// Use polling first, then upgrade to websocket if possible
-// Try connecting to the webview-specific Socket.IO endpoint
+// Socket.IO is at the root /socket.io/, not under webview paths
+// The LSP checks that there's NO origin header and verifies CSRF token
 const socket = io(serverRoot, {
-  path: `${webviewPath}/socket.io/`,
+  path: '/socket.io/',
   transports: ['polling', 'websocket'],
-  query: {
-    _csrf: csrfToken
+  extraHeaders: {
+    '_csrf': csrfToken
   },
   reconnection: true,
   reconnectionDelay: 1000,
-  reconnectionAttempts: 5
+  reconnectionAttempts: 5,
+  // Don't send origin header - LSP expects it to be undefined
+  autoConnect: false
 });
 
 // Track workflow ID
 let currentWorkflowId = null;
+
+// Manually connect after setup
+socket.connect();
+debug('Initiating connection...');
 
 // Connection events
 socket.on('connect', () => {
@@ -99,7 +101,7 @@ socket.on('connect', () => {
 socket.on('connect_error', (error) => {
   debug(`Connection error: ${error.message}`);
   debug(`Error details: ${JSON.stringify(error)}`);
-  debug(`Trying to connect to: ${serverRoot} with path: ${webviewPath}/socket.io/`);
+  debug(`Trying to connect to: ${serverRoot} with path: /socket.io/`);
   console.log(JSON.stringify({
     type: 'error',
     message: `Connection error: ${error.message}`,

@@ -880,27 +880,25 @@ function M:parse_curl_args(prompt_opts)
   Utils.debug("Starting GitLab Duo Agentic Chat with goal: " .. goal)
   Utils.debug("Chat params: " .. vim.inspect(workflow_params))
 
-  -- Start Socket.IO client with workflow params
-  -- It will emit startWorkflow automatically and we'll get workflowStarted event
-  local job_id, temp_id = M.start_socketio_client(workflow_params)
+  -- Generate a workflow ID for tracking
+  local workflow_id = "avante_workflow_" .. os.time() .. "_" .. math.random(1000, 9999)
   
-  if not job_id or not temp_id then
-    Utils.error("Failed to start Socket.IO client", { once = true, title = "Avante" })
-    return nil
-  end
-  
-  -- Store temporary workflow state
-  M.active_workflows[temp_id] = {
-    status = "CONNECTING",
+  -- Store workflow state
+  M.active_workflows[workflow_id] = {
+    status = "STARTING",
     goal = goal,
     errors = {},
     chat_log = {},
+    params = workflow_params,
   }
 
+  Utils.debug("Created workflow: " .. workflow_id)
   Utils.debug("Active workflows: " .. vim.inspect(vim.tbl_keys(M.active_workflows)))
 
-  -- Use temp_id initially - it will be updated when we receive workflowStarted
-  local workflow_id = temp_id
+  -- Send startWorkflow notification to LSP
+  -- The LSP will handle the workflow execution and send back workflowMessage notifications
+  client.notify("$/gitlab/startWorkflow", workflow_params)
+  Utils.debug("Sent $/gitlab/startWorkflow notification to LSP")
 
   -- Return a special marker that tells avante this is an LSP-based provider
   return {
