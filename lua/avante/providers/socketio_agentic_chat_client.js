@@ -50,14 +50,18 @@ debug(`Workflow params: ${JSON.stringify(workflowParams)}`);
 debug(`CSRF Token: ${csrfToken}`);
 
 // Connect to Socket.IO server
-// Socket.IO connects to the root server path, not the webview path
 // Extract server root from baseUrl (e.g., http://127.0.0.1:60087)
 const serverRoot = baseUrl.match(/^(https?:\/\/[^\/]+)/)[1];
 debug(`Server root: ${serverRoot}`);
 
+// Extract the webview path (e.g., /webview/agentic-duo-chat)
+const webviewPath = baseUrl.replace(serverRoot, '');
+debug(`Webview path: ${webviewPath}`);
+
 // Use polling first, then upgrade to websocket if possible
+// Try connecting to the webview-specific Socket.IO endpoint
 const socket = io(serverRoot, {
-  path: '/socket.io/',
+  path: `${webviewPath}/socket.io/`,
   transports: ['polling', 'websocket'],
   query: {
     _csrf: csrfToken
@@ -95,7 +99,7 @@ socket.on('connect', () => {
 socket.on('connect_error', (error) => {
   debug(`Connection error: ${error.message}`);
   debug(`Error details: ${JSON.stringify(error)}`);
-  debug(`Trying to connect to: ${serverRoot} with path: /socket.io/`);
+  debug(`Trying to connect to: ${serverRoot} with path: ${webviewPath}/socket.io/`);
   console.log(JSON.stringify({
     type: 'error',
     message: `Connection error: ${error.message}`,
