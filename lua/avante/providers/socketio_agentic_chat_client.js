@@ -50,8 +50,9 @@ debug(`Workflow params: ${JSON.stringify(workflowParams)}`);
 debug(`CSRF Token: ${csrfToken}`);
 
 // Connect to Socket.IO server
+// Use polling first, then upgrade to websocket if possible
 const socket = io(baseUrl, {
-  transports: ['websocket', 'polling'],
+  transports: ['polling', 'websocket'],
   query: {
     _csrf: csrfToken
   },

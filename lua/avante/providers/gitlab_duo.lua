@@ -931,34 +931,8 @@ function M:parse_response(ctx, data_stream, event_state, opts)
     return
   end
 
-  -- Query workflow status from LSP (since push notifications aren't working)
-  local client = M.get_gitlab_client()
-  Utils.debug("Attempting to poll workflow status, client exists: " .. tostring(client ~= nil))
-  
-  if client then
-    Utils.debug("Polling workflow with ID: " .. ctx.workflow_id)
-    local success, result = pcall(function()
-      return client.request_sync("$/gitlab/getWorkflowStatus", {
-        workflowId = ctx.workflow_id
-      }, 1000, vim.api.nvim_get_current_buf())
-    end)
-    
-    Utils.debug("Poll result - success: " .. tostring(success) .. ", result: " .. vim.inspect(result))
-    
-    if success and result and result.result then
-      Utils.debug("Polled workflow status: " .. vim.inspect(result.result))
-      -- Update workflow with polled data
-      M.handle_workflow_message(ctx.workflow_id, result.result)
-    elseif not success then
-      Utils.debug("Poll failed with error: " .. tostring(result))
-    elseif not result then
-      Utils.debug("Poll returned nil result")
-    elseif not result.result then
-      Utils.debug("Poll result has no .result field: " .. vim.inspect(result))
-    end
-  else
-    Utils.debug("No LSP client available for polling")
-  end
+  -- Socket.IO events should handle all updates now
+  -- No need for polling since we're using real-time Socket.IO connection
 
   Utils.debug(
     "parse_response: workflow status=" .. tostring(workflow.status) .. ", chat_log size=" .. #(workflow.chat_log or {})
