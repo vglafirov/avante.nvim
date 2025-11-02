@@ -80,7 +80,7 @@ function M.get_webview_metadata()
   return result.result
 end
 
----Get Socket.IO connection URL for workflow webview
+---Get Socket.IO connection URL for agentic chat webview
 ---@return string|nil, string|nil URL and CSRF token
 function M.get_socketio_url()
   local metadata = M.get_webview_metadata()
@@ -89,11 +89,11 @@ function M.get_socketio_url()
     return nil, nil
   end
 
-  -- Find the duo_workflow_panel webview
+  -- Find the agentic-duo-chat webview
   for _, webview in ipairs(metadata) do
-    if webview.id == "duo_workflow_panel" then
+    if webview.id == "agentic-duo-chat" then
       if not webview.uris or #webview.uris == 0 then
-        Utils.debug("get_socketio_url: No URIs found for duo_workflow_panel")
+        Utils.debug("get_socketio_url: No URIs found for agentic-duo-chat")
         return nil, nil
       end
 
@@ -101,7 +101,7 @@ function M.get_socketio_url()
       local uri = webview.uris[1]
       Utils.debug("get_socketio_url: Found URI: " .. uri)
 
-      -- Parse URI: http://127.0.0.1:PORT/webview/duo_workflow_panel?_csrf=TOKEN
+      -- Parse URI: http://127.0.0.1:PORT/webview/agentic-duo-chat?_csrf=TOKEN
       local base_url = uri:match("^(http://[^?]+)")
       local csrf_token = uri:match("_csrf=([^&]+)")
 
@@ -115,31 +115,35 @@ function M.get_socketio_url()
     end
   end
 
-  Utils.debug("get_socketio_url: duo_workflow_panel webview not found in metadata")
+  Utils.debug("get_socketio_url: agentic-duo-chat webview not found in metadata")
   return nil, nil
 end
 
----Start Socket.IO client process to receive workflow events
----@param workflow_id string
----@return number|nil Job ID if started successfully
-function M.start_socketio_client(workflow_id)
+---Start Socket.IO client process for agentic chat
+---@param workflow_params table Workflow parameters including goal, type, metadata
+---@return number|nil, string|nil Job ID if started successfully, temp workflow ID
+function M.start_socketio_client(workflow_params)
   -- Get Socket.IO connection URL
   local base_url, csrf_token = M.get_socketio_url()
   if not base_url or not csrf_token then
     Utils.error("Failed to get Socket.IO URL from LSP", { once = true, title = "Avante" })
-    return nil
+    return nil, nil
   end
 
-  -- Get the path to the socketio_client.js script
-  local script_path = vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":h") .. "/socketio_client.js"
+  -- Generate a temporary ID to track the connection
+  local temp_id = "avante_temp_" .. os.time() .. "_" .. math.random(1000, 9999)
+
+  -- Get the path to the socketio_agentic_chat_client.js script
+  local script_path = vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":h") .. "/socketio_agentic_chat_client.js"
   
-  Utils.debug("Starting Socket.IO client for workflow: " .. workflow_id)
+  Utils.debug("Starting Socket.IO client for agentic chat")
   Utils.debug("Base URL: " .. base_url)
   Utils.debug("Script path: " .. script_path)
+  Utils.debug("Temp ID: " .. temp_id)
 
   -- Check if socket.io-client is installed
   local check_cmd = "node -e \"require('socket.io-client')\" 2>&1"
-  local check_result = vim.fn.system(check_cmd)
+  vim.fn.system(check_cmd)
   if vim.v.shell_error ~= 0 then
     Utils.warn(
       "socket.io-client not installed. Installing via npm...\n" ..
@@ -155,13 +159,16 @@ function M.start_socketio_client(workflow_id)
     vim.fn.system(install_cmd)
   end
 
+  -- Convert workflow_params to JSON string
+  local workflow_params_json = vim.fn.json_encode(workflow_params)
+
   -- Start the Socket.IO client process
   local cmd = {
     "node",
     script_path,
     base_url,
-    workflow_id,
-    csrf_token
+    csrf_token,
+    workflow_params_json
   }
 
   local job_id = vim.fn.jobstart(cmd, {
@@ -172,7 +179,7 @@ function M.start_socketio_client(workflow_id)
             -- Parse JSON event from stdout
             local ok, event = pcall(vim.fn.json_decode, line)
             if ok and event then
-              M.handle_socketio_event(workflow_id, event)
+              M.handle_socketio_event(temp_id, event)
             else
               Utils.debug("Socket.IO: " .. line)
             end
@@ -191,36 +198,77 @@ function M.start_socketio_client(workflow_id)
     end,
     on_exit = function(_, exit_code, _)
       Utils.debug("Socket.IO client exited with code: " .. exit_code)
-      M.socketio_connections[workflow_id] = nil
+      M.socketio_connections[temp_id] = nil
     end,
     stdout_buffered = false,
     stderr_buffered = false,
   })
 
   if job_id > 0 then
-    M.socketio_connections[workflow_id] = job_id
+    M.socketio_connections[temp_id] = job_id
     Utils.debug("Socket.IO client started with job ID: " .. job_id)
-    return job_id
+    return job_id, temp_id
   else
     Utils.error("Failed to start Socket.IO client", { once = true, title = "Avante" })
-    return nil
+    return nil, nil
   end
 end
 
 ---Handle events received from Socket.IO client
----@param workflow_id string
+---@param temp_id string Temporary workflow ID
 ---@param event table
-function M.handle_socketio_event(workflow_id, event)
+function M.handle_socketio_event(temp_id, event)
   Utils.debug("Socket.IO event: " .. vim.inspect(event))
 
   local event_type = event.type
 
   if event_type == "connected" then
-    Utils.info("Connected to GitLab Duo workflow service", { once = true, title = "Avante" })
+    Utils.info("Connected to GitLab Duo Agentic Chat service", { once = true, title = "Avante" })
+  elseif event_type == "workflowStarted" then
+    -- Extract the real workflow ID from the event
+    local real_workflow_id = event.data and (event.data.workflowId or event.data.workflow_id or event.data.id)
+    if real_workflow_id then
+      Utils.debug("Workflow started with real ID: " .. real_workflow_id)
+      
+      -- Move the workflow state from temp_id to real workflow_id
+      if M.active_workflows[temp_id] then
+        M.active_workflows[real_workflow_id] = M.active_workflows[temp_id]
+        M.active_workflows[temp_id] = nil
+      end
+      
+      -- Update connection mapping
+      if M.socketio_connections[temp_id] then
+        M.socketio_connections[real_workflow_id] = M.socketio_connections[temp_id]
+        M.socketio_connections[temp_id] = nil
+      end
+      
+      Utils.info("Agentic Chat workflow started: " .. real_workflow_id, { once = true, title = "Avante" })
+    end
   elseif event_type == "workflowCheckpoint" then
+    -- Find the workflow ID (could be temp or real)
+    local workflow_id = temp_id
+    if not M.active_workflows[workflow_id] then
+      -- Try to find by checking all workflows
+      for id, _ in pairs(M.active_workflows) do
+        if M.socketio_connections[id] == M.socketio_connections[temp_id] then
+          workflow_id = id
+          break
+        end
+      end
+    end
+    
     -- Convert Socket.IO event to LSP format and handle it
     M.handle_workflow_message(workflow_id, event.data)
   elseif event_type == "workflowStatus" then
+    -- Find the workflow ID
+    local workflow_id = temp_id
+    for id, _ in pairs(M.active_workflows) do
+      if M.socketio_connections[id] == M.socketio_connections[temp_id] then
+        workflow_id = id
+        break
+      end
+    end
+    
     -- Update workflow status
     if M.active_workflows[workflow_id] then
       M.active_workflows[workflow_id].status = event.status
@@ -228,6 +276,7 @@ function M.handle_socketio_event(workflow_id, event)
     end
   elseif event_type == "workflowError" then
     Utils.error("Workflow error: " .. vim.inspect(event.error), { once = true, title = "Avante" })
+    local workflow_id = temp_id
     if M.active_workflows[workflow_id] then
       M.active_workflows[workflow_id].status = "FAILED"
       table.insert(M.active_workflows[workflow_id].errors, event.error)
@@ -820,39 +869,29 @@ function M:parse_curl_args(prompt_opts)
     vim.wait(100)
   end
 
-  -- Start the workflow via LSP request (not notify) to get the workflow ID back
+  -- Prepare workflow parameters for agentic chat
   local workflow_params = {
     goal = goal,
+    type = "chat",  -- Important: this is an agentic chat, not a workflow
     metadata = metadata,
     additionalContext = context,
   }
 
-  Utils.debug("Starting GitLab Duo workflow with goal: " .. goal)
-  Utils.debug("Workflow params: " .. vim.inspect(workflow_params))
+  Utils.debug("Starting GitLab Duo Agentic Chat with goal: " .. goal)
+  Utils.debug("Chat params: " .. vim.inspect(workflow_params))
 
-  -- Use request to get the workflow ID synchronously
-  local success, result = pcall(
-    function() return client.request_sync("$/gitlab/startWorkflow", workflow_params, 5000, bufnr) end
-  )
-
-  local workflow_id
-  if success and result and result.result then
-    workflow_id = result.result.workflowId or result.result.workflow_id
-    Utils.debug("GitLab Duo workflow started with ID: " .. tostring(workflow_id))
+  -- Start Socket.IO client with workflow params
+  -- It will emit startWorkflow automatically and we'll get workflowStarted event
+  local job_id, temp_id = M.start_socketio_client(workflow_params)
+  
+  if not job_id or not temp_id then
+    Utils.error("Failed to start Socket.IO client", { once = true, title = "Avante" })
+    return nil
   end
-
-  -- Fallback: generate local ID if GitLab doesn't return one
-  if not workflow_id then
-    workflow_id = "avante_" .. os.time() .. "_" .. math.random(1000, 9999)
-    Utils.debug("Using fallback workflow ID: " .. workflow_id)
-
-    -- Still send the workflow start notification
-    client.notify("$/gitlab/startWorkflow", workflow_params)
-  end
-
-  -- Store workflow ID for tracking
-  M.active_workflows[workflow_id] = {
-    status = "RUNNING",
+  
+  -- Store temporary workflow state
+  M.active_workflows[temp_id] = {
+    status = "CONNECTING",
     goal = goal,
     errors = {},
     chat_log = {},
@@ -860,8 +899,8 @@ function M:parse_curl_args(prompt_opts)
 
   Utils.debug("Active workflows: " .. vim.inspect(vim.tbl_keys(M.active_workflows)))
 
-  -- Start Socket.IO client to receive workflow events
-  M.start_socketio_client(workflow_id)
+  -- Use temp_id initially - it will be updated when we receive workflowStarted
+  local workflow_id = temp_id
 
   -- Return a special marker that tells avante this is an LSP-based provider
   return {

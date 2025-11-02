@@ -49,6 +49,10 @@ const socket = io(baseUrl, {
 socket.on('connect', () => {
   debug('Connected to Socket.IO server');
   
+  // Send webviewReady first (required for agentic chat)
+  socket.emit('webviewReady');
+  debug('Sent webviewReady notification');
+  
   // Send appReady notification
   socket.emit('appReady');
   debug('Sent appReady notification');
@@ -118,6 +122,22 @@ socket.on('initialState', (state) => {
   console.log(JSON.stringify({
     type: 'initialState',
     state
+  }));
+});
+
+socket.on('workflowStarted', (data) => {
+  debug('Received workflowStarted event');
+  console.log(JSON.stringify({
+    type: 'workflowStarted',
+    data
+  }));
+});
+
+socket.on('workflowPreCreated', (workflowId) => {
+  debug('Received workflowPreCreated event');
+  console.log(JSON.stringify({
+    type: 'workflowPreCreated',
+    workflowId
   }));
 });
 
