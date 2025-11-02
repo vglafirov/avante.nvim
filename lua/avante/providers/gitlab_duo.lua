@@ -869,40 +869,42 @@ function M:parse_curl_args(prompt_opts)
     vim.wait(100)
   end
 
-  -- Prepare workflow parameters for agentic chat
-  local workflow_params = {
+  -- Prepare agentic chat parameters
+  -- Note: Even though we call it "workflow_params", this is for AGENTIC CHAT
+  -- The type="chat" is what makes it agentic chat instead of a workflow
+  local chat_params = {
     goal = goal,
-    type = "chat",  -- Important: this is an agentic chat, not a workflow
+    type = "chat",  -- CRITICAL: type="chat" means agentic chat, NOT workflow
     metadata = metadata,
     additionalContext = context,
   }
 
   Utils.debug("Starting GitLab Duo Agentic Chat with goal: " .. goal)
-  Utils.debug("Chat params: " .. vim.inspect(workflow_params))
+  Utils.debug("Agentic Chat params: " .. vim.inspect(chat_params))
 
-  -- Generate a workflow ID for tracking
-  local workflow_id = "avante_workflow_" .. os.time() .. "_" .. math.random(1000, 9999)
+  -- Start Socket.IO client to connect to the agentic-duo-chat webview
+  -- The Socket.IO client will emit 'startWorkflow' (yes, confusingly named) with type="chat"
+  local job_id, temp_id = M.start_socketio_client(chat_params)
   
-  -- Store workflow state
-  M.active_workflows[workflow_id] = {
-    status = "STARTING",
+  if not job_id or not temp_id then
+    Utils.error("Failed to start Socket.IO client for Agentic Chat", { once = true, title = "Avante" })
+    return nil
+  end
+  
+  -- Store chat state with temporary ID (will be replaced when we get workflowStarted event)
+  M.active_workflows[temp_id] = {
+    status = "CONNECTING",
     goal = goal,
     errors = {},
     chat_log = {},
-    params = workflow_params,
   }
 
-  Utils.debug("Created workflow: " .. workflow_id)
-  Utils.debug("Active workflows: " .. vim.inspect(vim.tbl_keys(M.active_workflows)))
-
-  -- Send startWorkflow notification to LSP
-  -- The LSP will handle the workflow execution and send back workflowMessage notifications
-  client.notify("$/gitlab/startWorkflow", workflow_params)
-  Utils.debug("Sent $/gitlab/startWorkflow notification to LSP")
+  Utils.debug("Created agentic chat session: " .. temp_id)
+  Utils.debug("Active chats: " .. vim.inspect(vim.tbl_keys(M.active_workflows)))
 
   -- Return a special marker that tells avante this is an LSP-based provider
   return {
-    workflow_id = workflow_id,
+    workflow_id = temp_id,  -- Using temp ID until we get real one from workflowStarted
     is_lsp_provider = true,
   }
 end
