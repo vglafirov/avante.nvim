@@ -50,8 +50,14 @@ debug(`Workflow params: ${JSON.stringify(workflowParams)}`);
 debug(`CSRF Token: ${csrfToken}`);
 
 // Connect to Socket.IO server
+// Socket.IO connects to the root server path, not the webview path
+// Extract server root from baseUrl (e.g., http://127.0.0.1:60087)
+const serverRoot = baseUrl.match(/^(https?:\/\/[^\/]+)/)[1];
+debug(`Server root: ${serverRoot}`);
+
 // Use polling first, then upgrade to websocket if possible
-const socket = io(baseUrl, {
+const socket = io(serverRoot, {
+  path: '/socket.io/',
   transports: ['polling', 'websocket'],
   query: {
     _csrf: csrfToken
@@ -88,9 +94,12 @@ socket.on('connect', () => {
 
 socket.on('connect_error', (error) => {
   debug(`Connection error: ${error.message}`);
+  debug(`Error details: ${JSON.stringify(error)}`);
+  debug(`Trying to connect to: ${serverRoot} with path: /socket.io/`);
   console.log(JSON.stringify({
     type: 'error',
-    message: `Connection error: ${error.message}`
+    message: `Connection error: ${error.message}`,
+    details: error.description || error.type || 'unknown'
   }));
 });
 
