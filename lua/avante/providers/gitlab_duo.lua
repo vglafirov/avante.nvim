@@ -1046,6 +1046,49 @@ end
 function M._register_handlers(client)
   Utils.debug("Registering GitLab Duo LSP handlers...")
 
+  -- Register handler for workflow status updates
+  if not client.handlers["$/gitlab/workflowStatusUpdate"] then
+    client.handlers["$/gitlab/workflowStatusUpdate"] = function(err, result, ctx)
+      Utils.debug("===== WORKFLOW STATUS UPDATE =====")
+      Utils.debug("Result: " .. vim.inspect(result))
+      
+      if err then
+        Utils.error("Workflow status update error: " .. vim.inspect(err), {
+          once = true,
+          title = "Avante",
+        })
+        return
+      end
+      
+      local workflow_id = result.workflowId or result.workflow_id or result.id
+      if not workflow_id then
+        -- Try to find the first active workflow
+        local active_ids = vim.tbl_keys(M.active_workflows)
+        if #active_ids == 1 then
+          workflow_id = active_ids[1]
+          Utils.debug("Using single active workflow for status update: " .. workflow_id)
+        end
+      end
+      
+      if workflow_id and M.active_workflows[workflow_id] then
+        local status = result.status or result.workflowStatus
+        Utils.debug("Updating workflow " .. workflow_id .. " status to: " .. tostring(status))
+        M.active_workflows[workflow_id].status = status
+        
+        -- Trigger update event
+        vim.schedule(function()
+          vim.api.nvim_exec_autocmds("User", {
+            pattern = "AvanteGitLabDuoWorkflowUpdate",
+            data = { workflow_id = workflow_id, status = status }
+          })
+        end)
+      else
+        Utils.debug("Received status update for unknown workflow: " .. tostring(workflow_id))
+      end
+    end
+    Utils.debug("Registered handler for $/gitlab/workflowStatusUpdate")
+  end
+
   -- Register handler for workflow messages
   if not client.handlers["$/gitlab/workflowMessage"] then
     client.handlers["$/gitlab/workflowMessage"] = function(err, result, ctx)
@@ -1152,6 +1195,15 @@ function M._register_handlers(client)
     Utils.debug("Registered handler for $/gitlab/runCommand")
   else
     Utils.debug("Handler for $/gitlab/runCommand already registered")
+  end
+
+  -- Add catch-all notification logger to see what we're missing
+  local original_on_notification = client.handlers["$/progress"]
+  vim.lsp.handlers["$/gitlab/"] = function(err, result, ctx, config)
+    Utils.debug("===== RECEIVED GITLAB NOTIFICATION =====")
+    Utils.debug("Method: " .. tostring(ctx.method))
+    Utils.debug("Error: " .. vim.inspect(err))
+    Utils.debug("Result: " .. vim.inspect(result))
   end
 
   Utils.info("GitLab Duo LSP handlers registered", { once = true, title = "Avante" })
