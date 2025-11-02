@@ -688,6 +688,22 @@ function M:parse_response(ctx, data_stream, event_state, opts)
     return
   end
 
+  -- Query workflow status from LSP (since push notifications aren't working)
+  local client = M.get_gitlab_client()
+  if client then
+    local success, result = pcall(function()
+      return client.request_sync("$/gitlab/getWorkflowStatus", {
+        workflowId = ctx.workflow_id
+      }, 1000, vim.api.nvim_get_current_buf())
+    end)
+    
+    if success and result and result.result then
+      Utils.debug("Polled workflow status: " .. vim.inspect(result.result))
+      -- Update workflow with polled data
+      M.handle_workflow_message(ctx.workflow_id, result.result)
+    end
+  end
+
   Utils.debug(
     "parse_response: workflow status=" .. tostring(workflow.status) .. ", chat_log size=" .. #(workflow.chat_log or {})
   )
