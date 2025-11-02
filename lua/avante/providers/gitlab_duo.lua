@@ -16,6 +16,9 @@ M.role_map = {
 -- Store active workflows
 M.active_workflows = {}
 
+-- Store Socket.IO connection handles
+M.socketio_connections = {}
+
 -- Error status codes from GitLab Duo specification
 M.error_codes = {
   [1] = "Your request was valid but Workflow failed to complete it. Please try again.",
@@ -47,6 +50,204 @@ function M.get_gitlab_client()
     if client.name == "gitlab_lsp" or client.name == "gitlab_code_suggestions" then return client end
   end
   return nil
+end
+
+---Get webview metadata including HTTP server URL and port
+---@return table|nil Array of webview metadata objects with id, title, and uris
+function M.get_webview_metadata()
+  local client = M.get_gitlab_client()
+  if not client then
+    Utils.debug("get_webview_metadata: No GitLab LSP client found")
+    return nil
+  end
+
+  -- Use request_sync to query webview metadata
+  local success, result = pcall(function()
+    return client.request_sync("$/gitlab/webview-metadata", {}, 5000, vim.api.nvim_get_current_buf())
+  end)
+
+  if not success then
+    Utils.debug("get_webview_metadata: Request failed: " .. tostring(result))
+    return nil
+  end
+
+  if not result or not result.result then
+    Utils.debug("get_webview_metadata: No result returned")
+    return nil
+  end
+
+  Utils.debug("get_webview_metadata: Received metadata: " .. vim.inspect(result.result))
+  return result.result
+end
+
+---Get Socket.IO connection URL for workflow webview
+---@return string|nil, string|nil URL and CSRF token
+function M.get_socketio_url()
+  local metadata = M.get_webview_metadata()
+  if not metadata then
+    Utils.debug("get_socketio_url: No webview metadata available")
+    return nil, nil
+  end
+
+  -- Find the duo_workflow_panel webview
+  for _, webview in ipairs(metadata) do
+    if webview.id == "duo_workflow_panel" then
+      if not webview.uris or #webview.uris == 0 then
+        Utils.debug("get_socketio_url: No URIs found for duo_workflow_panel")
+        return nil, nil
+      end
+
+      -- Extract the first URI and parse it
+      local uri = webview.uris[1]
+      Utils.debug("get_socketio_url: Found URI: " .. uri)
+
+      -- Parse URI: http://127.0.0.1:PORT/webview/duo_workflow_panel?_csrf=TOKEN
+      local base_url = uri:match("^(http://[^?]+)")
+      local csrf_token = uri:match("_csrf=([^&]+)")
+
+      if base_url and csrf_token then
+        Utils.debug("get_socketio_url: Base URL: " .. base_url .. ", CSRF: " .. csrf_token)
+        return base_url, csrf_token
+      else
+        Utils.debug("get_socketio_url: Failed to parse URI")
+        return nil, nil
+      end
+    end
+  end
+
+  Utils.debug("get_socketio_url: duo_workflow_panel webview not found in metadata")
+  return nil, nil
+end
+
+---Start Socket.IO client process to receive workflow events
+---@param workflow_id string
+---@return number|nil Job ID if started successfully
+function M.start_socketio_client(workflow_id)
+  -- Get Socket.IO connection URL
+  local base_url, csrf_token = M.get_socketio_url()
+  if not base_url or not csrf_token then
+    Utils.error("Failed to get Socket.IO URL from LSP", { once = true, title = "Avante" })
+    return nil
+  end
+
+  -- Get the path to the socketio_client.js script
+  local script_path = vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":h") .. "/socketio_client.js"
+  
+  Utils.debug("Starting Socket.IO client for workflow: " .. workflow_id)
+  Utils.debug("Base URL: " .. base_url)
+  Utils.debug("Script path: " .. script_path)
+
+  -- Check if socket.io-client is installed
+  local check_cmd = "node -e \"require('socket.io-client')\" 2>&1"
+  local check_result = vim.fn.system(check_cmd)
+  if vim.v.shell_error ~= 0 then
+    Utils.warn(
+      "socket.io-client not installed. Installing via npm...\n" ..
+      "Run: npm install -g socket.io-client",
+      { once = true, title = "Avante" }
+    )
+    
+    -- Attempt to install locally in the script directory
+    local install_cmd = string.format(
+      "cd %s && npm install socket.io-client 2>&1",
+      vim.fn.shellescape(vim.fn.fnamemodify(script_path, ":h"))
+    )
+    vim.fn.system(install_cmd)
+  end
+
+  -- Start the Socket.IO client process
+  local cmd = {
+    "node",
+    script_path,
+    base_url,
+    workflow_id,
+    csrf_token
+  }
+
+  local job_id = vim.fn.jobstart(cmd, {
+    on_stdout = function(_, data, _)
+      if data then
+        for _, line in ipairs(data) do
+          if line and line ~= "" then
+            -- Parse JSON event from stdout
+            local ok, event = pcall(vim.fn.json_decode, line)
+            if ok and event then
+              M.handle_socketio_event(workflow_id, event)
+            else
+              Utils.debug("Socket.IO: " .. line)
+            end
+          end
+        end
+      end
+    end,
+    on_stderr = function(_, data, _)
+      if data then
+        for _, line in ipairs(data) do
+          if line and line ~= "" then
+            Utils.debug("Socket.IO [stderr]: " .. line)
+          end
+        end
+      end
+    end,
+    on_exit = function(_, exit_code, _)
+      Utils.debug("Socket.IO client exited with code: " .. exit_code)
+      M.socketio_connections[workflow_id] = nil
+    end,
+    stdout_buffered = false,
+    stderr_buffered = false,
+  })
+
+  if job_id > 0 then
+    M.socketio_connections[workflow_id] = job_id
+    Utils.debug("Socket.IO client started with job ID: " .. job_id)
+    return job_id
+  else
+    Utils.error("Failed to start Socket.IO client", { once = true, title = "Avante" })
+    return nil
+  end
+end
+
+---Handle events received from Socket.IO client
+---@param workflow_id string
+---@param event table
+function M.handle_socketio_event(workflow_id, event)
+  Utils.debug("Socket.IO event: " .. vim.inspect(event))
+
+  local event_type = event.type
+
+  if event_type == "connected" then
+    Utils.info("Connected to GitLab Duo workflow service", { once = true, title = "Avante" })
+  elseif event_type == "workflowCheckpoint" then
+    -- Convert Socket.IO event to LSP format and handle it
+    M.handle_workflow_message(workflow_id, event.data)
+  elseif event_type == "workflowStatus" then
+    -- Update workflow status
+    if M.active_workflows[workflow_id] then
+      M.active_workflows[workflow_id].status = event.status
+      Utils.debug("Workflow status updated: " .. tostring(event.status))
+    end
+  elseif event_type == "workflowError" then
+    Utils.error("Workflow error: " .. vim.inspect(event.error), { once = true, title = "Avante" })
+    if M.active_workflows[workflow_id] then
+      M.active_workflows[workflow_id].status = "FAILED"
+      table.insert(M.active_workflows[workflow_id].errors, event.error)
+    end
+  elseif event_type == "error" then
+    Utils.error("Socket.IO error: " .. event.message, { once = true, title = "Avante" })
+  elseif event_type == "disconnected" then
+    Utils.warn("Socket.IO disconnected: " .. event.reason, { once = true, title = "Avante" })
+  end
+end
+
+---Stop Socket.IO client for a workflow
+---@param workflow_id string
+function M.stop_socketio_client(workflow_id)
+  local job_id = M.socketio_connections[workflow_id]
+  if job_id then
+    Utils.debug("Stopping Socket.IO client for workflow: " .. workflow_id)
+    vim.fn.jobstop(job_id)
+    M.socketio_connections[workflow_id] = nil
+  end
 end
 
 ---Get git remote URL from the current working directory
@@ -659,6 +860,9 @@ function M:parse_curl_args(prompt_opts)
 
   Utils.debug("Active workflows: " .. vim.inspect(vim.tbl_keys(M.active_workflows)))
 
+  -- Start Socket.IO client to receive workflow events
+  M.start_socketio_client(workflow_id)
+
   -- Return a special marker that tells avante this is an LSP-based provider
   return {
     workflow_id = workflow_id,
@@ -820,6 +1024,11 @@ end
 ---@param workflow_id string
 function M.stop_workflow(workflow_id)
   Utils.debug("Stopping workflow: " .. workflow_id)
+  
+  -- Stop Socket.IO client first
+  M.stop_socketio_client(workflow_id)
+  
+  -- Send stop event to LSP
   if M.send_workflow_event(workflow_id, "stop") then
     M.active_workflows[workflow_id] = nil
   end
